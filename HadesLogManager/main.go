@@ -152,7 +152,12 @@ func connectNATS(config hadesnats.ConnectionConfig) (*nats.Conn, error) {
 func runWithGracefulShutdown(ctx context.Context, cancel context.CancelFunc, cfg HadesLogManagerConfig, dynamicManager buildlogs.LogManager, logAggregator buildlogs.LogAggregator, dispatcher *StatusWebhookDispatcher,
 ) error {
 	var wg sync.WaitGroup
-	errChan := make(chan error, 3)
+	// One slot per goroutine started below (metrics, dynamic log manager, status
+	// webhook dispatcher, API server). The buffer must never be smaller than the
+	// number of senders: each sends before its deferred wg.Done() runs, so a
+	// blocked send would leave wg.Wait() hanging forever. Shutdown on a signal
+	// drains nothing from this channel, so the buffer alone has to absorb them.
+	errChan := make(chan error, 4)
 
 	// Start the Prometheus metrics server on a dedicated, cluster-internal port.
 	wg.Add(1)

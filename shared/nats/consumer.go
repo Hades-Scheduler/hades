@@ -52,13 +52,13 @@ const (
 type ConsumerConfig struct {
 	// Concurrency is the maximum number of jobs processed simultaneously by a
 	// single scheduler instance.
-	Concurrency uint `env:"CONCURRENCY" envDefault:"1"`
+	Concurrency uint `env:"CONCURRENCY"`
 	// AckWait is the JetStream ack timeout for an in-flight job. See
 	// DefaultAckWait: it is a liveness backstop, not a job-duration budget.
-	AckWait time.Duration `env:"NATS_ACK_WAIT" envDefault:"1m"`
+	AckWait time.Duration `env:"NATS_ACK_WAIT"`
 	// MaxDeliver is the maximum number of times a single job is delivered. See
 	// DefaultMaxDeliver.
-	MaxDeliver int `env:"NATS_MAX_DELIVER" envDefault:"3"`
+	MaxDeliver int `env:"NATS_MAX_DELIVER"`
 }
 
 // withDefaults returns the config with non-positive values replaced by the

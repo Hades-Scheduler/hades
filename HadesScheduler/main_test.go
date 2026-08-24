@@ -3,8 +3,8 @@ package main
 import (
 	"os"
 	"testing"
-	"time"
 
+	hadesnats "github.com/hades-scheduler/hades/shared/nats"
 	"github.com/hades-scheduler/hades/shared/utils"
 )
 
@@ -35,13 +35,13 @@ func TestConsumerConfigDefaultsAreLoaded(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 
-	if got := cfg.ConsumerConfig.Concurrency; got != 1 {
-		t.Errorf("Concurrency = %d, want 1", got)
+	if got := cfg.ConsumerConfig.Concurrency; got != hadesnats.DefaultConcurrency {
+		t.Errorf("Concurrency = %d, want %d", got, hadesnats.DefaultConcurrency)
 	}
-	if got := cfg.ConsumerConfig.AckWait; got != time.Minute {
-		t.Errorf("AckWait = %v, want 1m", got)
+	if got := cfg.ConsumerConfig.AckWait; got != hadesnats.DefaultAckWait {
+		t.Errorf("AckWait = %v, want %v", got, hadesnats.DefaultAckWait)
 	}
-	if got := cfg.ConsumerConfig.MaxDeliver; got != 3 {
-		t.Errorf("MaxDeliver = %d, want 3", got)
+	if got := cfg.ConsumerConfig.MaxDeliver; got != hadesnats.DefaultMaxDeliver {
+		t.Errorf("MaxDeliver = %d, want %d", got, hadesnats.DefaultMaxDeliver)
 	}
 }

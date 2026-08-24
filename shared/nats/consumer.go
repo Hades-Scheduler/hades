@@ -38,6 +38,11 @@ const (
 	// message (see processJob), so the default allows two execution attempts.
 	DefaultMaxDeliver = 3
 
+	// DefaultConcurrency is how many jobs one scheduler instance processes at
+	// once. Named rather than inlined so the envDefault tag below, withDefaults
+	// and the documentation all point at one value.
+	DefaultConcurrency = 1
+
 	// maxAckProgressInterval caps the in-progress heartbeat so a long AckWait
 	// does not lead to a needlessly coarse heartbeat.
 	maxAckProgressInterval = 10 * time.Second
@@ -49,23 +54,37 @@ const (
 
 // ConsumerConfig holds the tunables of the JetStream job consumer.
 // Zero values fall back to the defaults above.
+//
+// The envDefault tags matter beyond convenience. withDefaults() below is
+// applied inside NewHadesConsumer, so the consumer always RUNS with the right
+// values - but without these tags a config parsed from an environment that sets
+// none of them stays at zero, and anything inspecting it (notably the
+// scheduler's startup log) reports 0/0s/0 while the consumer actually uses
+// 1/1m/3. A configuration log that disagrees with the effective configuration
+// is worse than no log, so the defaults are declared here as well.
+//
+// The tag literals must stay in step with the constants above; the values are
+// duplicated because struct tags cannot reference Go constants.
+// TestConsumerConfigEnvDefaultsMatchConstants pins them together.
 type ConsumerConfig struct {
 	// Concurrency is the maximum number of jobs processed simultaneously by a
 	// single scheduler instance.
-	Concurrency uint `env:"CONCURRENCY"`
+	Concurrency uint `env:"CONCURRENCY" envDefault:"1"`
 	// AckWait is the JetStream ack timeout for an in-flight job. See
 	// DefaultAckWait: it is a liveness backstop, not a job-duration budget.
-	AckWait time.Duration `env:"NATS_ACK_WAIT"`
+	AckWait time.Duration `env:"NATS_ACK_WAIT" envDefault:"1m"`
 	// MaxDeliver is the maximum number of times a single job is delivered. See
 	// DefaultMaxDeliver.
-	MaxDeliver int `env:"NATS_MAX_DELIVER"`
+	MaxDeliver int `env:"NATS_MAX_DELIVER" envDefault:"3"`
 }
 
 // withDefaults returns the config with non-positive values replaced by the
-// package defaults.
+// package defaults. Still required despite the envDefault tags above: a
+// ConsumerConfig built programmatically (tests, direct struct literals) never
+// goes through env.Parse and would otherwise reach JetStream as zeros.
 func (c ConsumerConfig) withDefaults() ConsumerConfig {
 	if c.Concurrency == 0 {
-		c.Concurrency = 1
+		c.Concurrency = DefaultConcurrency
 	}
 	if c.AckWait <= 0 {
 		c.AckWait = DefaultAckWait

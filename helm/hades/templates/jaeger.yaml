@@ -1,0 +1,45 @@
+{{- if .Values.tracing.deployJaeger }}
+# In-cluster Jaeger all-in-one: OTLP receiver + trace UI. Stores traces in
+# memory, so it is intended for dev/test clusters. Rendered only when
+# tracing.deployJaeger is set.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "hades-jaeger"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hades-jaeger-selector
+  template:
+    metadata:
+      labels:
+        app: hades-jaeger-selector
+    spec:
+      containers:
+        - name: jaeger
+          image: {{ .Values.tracing.jaeger.image | quote }}
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: ui
+              containerPort: 16686
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: "hades-jaeger"
+spec:
+  selector:
+    app: hades-jaeger-selector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+    - name: ui
+      port: 16686
+      targetPort: ui
+{{- end }}

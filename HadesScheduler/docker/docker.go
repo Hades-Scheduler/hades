@@ -71,6 +71,15 @@ func removeContainer(ctx context.Context, cli *client.Client, containerID string
 	return nil
 }
 
+// imagePresentLocally reports whether the image is already in the local Docker
+// cache, so image_pull timing can be split into cold and warm pulls. A failed
+// inspect (image absent, or any error) is treated as not-present; this is a
+// best-effort label, not a correctness gate.
+func imagePresentLocally(ctx context.Context, cli *client.Client, image string) bool {
+	_, err := cli.ImageInspect(ctx, image)
+	return err == nil
+}
+
 func pullImages(ctx context.Context, cli *client.Client, images ...string) error {
 	var wg sync.WaitGroup
 	errorsCh := make(chan error, len(images))

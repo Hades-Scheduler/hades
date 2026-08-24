@@ -17,6 +17,7 @@ services:
     environment:
       - NATS_URL=nats://nats:4222
       - HADES_VERSION=${HADES_VERSION:-dev}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
 
   hadesScheduler:
     image: ghcr.io/hades-scheduler/hades/hades-scheduler
@@ -37,7 +38,8 @@ services:
     environment:
       - NATS_URL=nats://nats:4222
       - HADES_EXECUTOR=docker
-    
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+
   hadesLogManager:
     image: ghcr.io/hades-scheduler/hades/hades-log-manager
     build:
@@ -55,6 +57,7 @@ services:
     environment:
       - HADESLOGMANAGER_API_PORT=8081
       - NATS_URL=nats://nats:4222
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
 
   nats:
     image: nats:2.11.4
@@ -69,6 +72,19 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+
+  # Tracing backend: receives OTLP spans from every service and serves the trace
+  # waterfall UI. Ports are also published to the host so services started with
+  # `make run` (on the host, not in this network) can export to localhost:4317.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - hades
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4317:4317"   # OTLP gRPC receiver
 
 networks:
   hades:

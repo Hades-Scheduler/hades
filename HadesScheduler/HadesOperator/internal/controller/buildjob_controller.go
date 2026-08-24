@@ -261,6 +261,12 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				return ctrl.Result{}, err
 			}
 
+			// Emit the job's overhead/runtime breakdown, derived from the pod's
+			// container timestamps. This runs exactly once: setStatusCompleted has
+			// set the terminal phase, so the guard at the top of Reconcile
+			// short-circuits every later reconcile of this BuildJob.
+			r.emitJobTiming(ctx, &bj)
+
 			// All logs are published; stop tracking this job's streams.
 			r.logStreams().stopJob(bj.Namespace, bj.Name)
 

@@ -2,11 +2,19 @@ apiVersion: v1
 kind: Service
 metadata:
   name: "hades-scheduler-service"
+  labels:
+    app.kubernetes.io/part-of: hades
+    app.kubernetes.io/component: scheduler
 spec:
   selector:
     app: hades-scheduler-selector
   ports:
-    - port: {{ .Values.hadesScheduler.service.port }}
+    - name: http
+      port: {{ .Values.hadesScheduler.service.port }}
       targetPort: {{ .Values.hadesScheduler.service.targetPort }}
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.monitoring.port }}
+      targetPort: metrics
       protocol: TCP
   type: {{ .Values.hadesScheduler.service.type }}

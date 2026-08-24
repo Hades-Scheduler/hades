@@ -17,12 +17,16 @@ help: ## Show this help.
 ##@ Run (CLI)
 
 .PHONY: run
-run: docker-run-nats ## Run api, scheduler, and logmanager locally via go run (Ctrl-C stops all).
-	@echo "Starting api, scheduler, logmanager (Ctrl-C to stop all)..."
+run: docker-run-nats docker-run-jaeger ## Run api, scheduler, and logmanager locally via go run (Ctrl-C stops all).
+	@echo "Starting api, scheduler, logmanager (Ctrl-C to stop all). Traces: http://localhost:16686"
+	@# Distinct METRICS_PORT per service: they share this host, so they cannot all
+	@# bind the default 8082 (in Kubernetes each pod has its own network namespace).
+	@# OTEL endpoint points at the Jaeger container published on the host.
 	@trap 'kill 0' INT TERM EXIT; \
-		(cd HadesAPI       && go run .) & \
-		(cd HadesScheduler && go run .) & \
-		(cd HadesLogManager && go run .) & \
+		export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317; \
+		(cd HadesAPI       && METRICS_PORT=8082 go run .) & \
+		(cd HadesScheduler && METRICS_PORT=8084 go run .) & \
+		(cd HadesLogManager && METRICS_PORT=8086 go run .) & \
 		wait
 
 .PHONY: run-api
@@ -58,6 +62,10 @@ docker-run-scheduler: ## Start only the HadesScheduler service via docker compos
 .PHONY: docker-run-nats
 docker-run-nats: ## Start only the NATS service via docker compose.
 	$(COMPOSE) -f $(COMPOSE_FILE) up -d nats
+
+.PHONY: docker-run-jaeger
+docker-run-jaeger: ## Start only the Jaeger tracing backend via docker compose (UI on :16686).
+	$(COMPOSE) -f $(COMPOSE_FILE) up -d jaeger
 
 .PHONY: docker-stop
 docker-stop: ## Stop the local docker compose stack.

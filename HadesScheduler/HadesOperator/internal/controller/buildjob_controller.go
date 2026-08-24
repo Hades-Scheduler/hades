@@ -258,7 +258,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// Hold off finalizing (and deleting the pod) until every container's
 			// log stream has drained, so no tail logs are lost.
 			if draining {
-				return ctrl.Result{RequeueAfter: r.requeueDelay()}, nil
+				return ctrl.Result{RequeueAfter: logDrainRequeueDelay}, nil
 			}
 
 			// Drain gate: when the CR (and thus the pod) will be deleted on

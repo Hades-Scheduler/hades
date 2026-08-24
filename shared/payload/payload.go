@@ -35,6 +35,7 @@ type QueuePayload struct {
 	Steps          []Step            `json:"steps"`                               // Ordered list of steps to execute
 	CallbackURL    string            `json:"callback_url,omitempty" format:"uri"` // Optional per-job destination for forwarding aggregated logs/results. Must be an absolute http/https URL with a host.
 	TimeoutSeconds int64             `json:"timeout_seconds,omitempty"`           // Whole-job timeout in seconds; the job is killed and marked failed once exceeded. 0 = no timeout.
+	TraceParent    string            `json:"traceparent,omitempty"`               // W3C trace context propagated from the API so scheduler/operator spans nest under the job trace. Not injected into containers.
 }
 
 // Step represents a single execution step in a job.

@@ -17,10 +17,13 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
+	"time"
 
 	"github.com/hades-scheduler/hades/hadesScheduler/log"
+	"github.com/hades-scheduler/hades/shared/timing"
 	"github.com/hades-scheduler/hades/shared/utils"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -34,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	buildv1 "github.com/hades-scheduler/hades/HadesScheduler/HadesOperator/api/v1"
@@ -67,6 +71,7 @@ const DefaultMaxParallelism = 100
 func main() {
 	var enableLeaderElection bool
 	var probeAddr string
+	var metricsAddr string
 	var enableDevMode bool
 
 	if os.Getenv("DEV_MODE") == "true" {
@@ -74,6 +79,7 @@ func main() {
 	}
 
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8083", "The address the probe endpoint binds to.")
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8082", "The address the metrics endpoint binds to. Set to \"0\" to disable.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
 	opts := zap.Options{Development: enableDevMode}
 	opts.BindFlags(flag.CommandLine)
@@ -107,8 +113,11 @@ func main() {
 
 	mgrOpts := ctrl.Options{
 		Scheme: scheme,
-		// Disable the metrics server
-		Metrics:                metricsserver.Options{BindAddress: "0"},
+		// controller-runtime serves its own registry here (reconcile/workqueue/Go
+		// runtime metrics) over plain HTTP on a dedicated, cluster-internal port.
+		// SecureServing stays off for parity with the other Hades services; the
+		// port is never exposed via the public ingress. Set to "0" to disable.
+		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "715d8f3b.hades.tum.de",
@@ -140,6 +149,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Serve the Hades timing histograms on controller-runtime's registry, i.e. the
+	// same /metrics endpoint (metricsAddr) as its built-in reconcile/workqueue
+	// metrics.
+	timing.MustRegister(ctrlmetrics.Registry)
+
+	// Enable OpenTelemetry tracing when OTEL_EXPORTER_OTLP_ENDPOINT is set; noop
+	// otherwise. The operator's backdated step spans nest under the job trace
+	// propagated via the BuildJob annotation.
+	tracingShutdown, err := timing.InitTracing(context.Background(), "hades-operator")
+	if err != nil {
+		setupLog.Error(err, "unable to init tracing")
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tracingShutdown(shutdownCtx)
+	}()
+
 	var natsConfig hadesnats.ConnectionConfig
 	if err := utils.LoadConfig(&natsConfig); err != nil {
 		setupLog.Error(err, "unable to load NATS configuration")
@@ -151,6 +179,7 @@ func main() {
 		"cluster_wide", nsConfig.WatchNamespace == "",
 		"delete_on_complete", operatorConfig.DeleteOnComplete,
 		"max_parallelism", operatorConfig.MaxParallelism,
+		"metrics_addr", metricsAddr,
 		"dev_mode", enableDevMode,
 		"nats_url", natsConfig.URL,
 		"nats_tls", natsConfig.TLS,

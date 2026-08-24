@@ -186,6 +186,85 @@ ingress:
   annotations:
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
 
+# -- Prometheus monitoring. Every Hades service exposes a Prometheus `/metrics`
+# endpoint on a dedicated, cluster-internal port (never via the public ingress);
+# a ServiceMonitor registers them with a cluster Prometheus Operator.
+monitoring:
+  # -- Render a ServiceMonitor for the Hades services. Requires the Prometheus
+  # Operator CRDs (`monitoring.coreos.com`) on the cluster. The `/metrics`
+  # endpoints are always exposed; this flag only controls the ServiceMonitor, so
+  # the chart installs cleanly on clusters without the Prometheus Operator.
+  enabled: false
+  # -- Container/Service port each service serves `/metrics` on.
+  port: 8082
+  serviceMonitor:
+    # -- Prometheus scrape interval.
+    interval: 30s
+    # -- Per-scrape timeout.
+    scrapeTimeout: 10s
+    # -- Extra labels on the ServiceMonitor so a Prometheus instance selects it
+    # (e.g. `{ release: kube-prometheus-stack }`).
+    labels: {}
+
+# -- OpenTelemetry tracing. When enabled, every Hades service exports spans to an
+# OTLP endpoint so a job's overhead/runtime breakdown is visible as a per-job
+# trace waterfall (API -> scheduler -> operator). Disabled by default: with no
+# endpoint the services run a noop tracer, so the chart installs cleanly without
+# a tracing backend.
+tracing:
+  # -- Export OTLP spans from every service. Requires a resolvable endpoint
+  # (`tracing.endpoint`, or the bundled Jaeger via `tracing.deployJaeger`).
+  enabled: false
+  # -- OTLP gRPC endpoint spans are exported to (an OpenTelemetry Collector or a
+  # Jaeger with OTLP enabled), e.g. `http://otel-collector.observability:4317`.
+  # When empty and `deployJaeger` is true, the bundled Jaeger is used.
+  endpoint: ""
+  # -- Deploy an in-cluster Jaeger all-in-one as the tracing backend and UI. It
+  # stores traces in memory, so it is for dev/test clusters, not production;
+  # point `endpoint` at a real collector there instead.
+  deployJaeger: false
+  jaeger:
+    # -- Jaeger all-in-one image used when `deployJaeger` is true.
+    image: jaegertracing/all-in-one:1.62.0
+    # -- Bundled-Jaeger UI exposure. The UI Service is ClusterIP (in-cluster /
+    # port-forward only) by default; enable this Ingress to reach it from
+    # outside. It is protected by HTTP basic auth - rendering fails if enabled
+    # without a password or an existing secret.
+    #
+    # IMPORTANT: the basic auth is enforced with ingress-nginx annotations
+    # (`nginx.ingress.kubernetes.io/auth-*`), so the login only takes effect when
+    # `className` routes to an ingress-nginx controller. If you point it at a
+    # different controller (Traefik, HAProxy, ...), those annotations are ignored
+    # and the UI would be exposed WITHOUT auth - provide equivalent auth for that
+    # controller instead, or keep it ClusterIP + port-forward.
+    ui:
+      ingress:
+        # -- Expose the Jaeger UI via an Ingress (behind ingress-nginx basic auth).
+        enabled: false
+        # -- Ingress class for the UI. Basic auth requires an ingress-nginx
+        # controller (see the note above); other controllers ignore the auth
+        # annotations.
+        className: "nginx"
+        # -- Hostname for the Jaeger UI. Required when `enabled`.
+        host: ""
+        # -- Extra annotations merged onto the UI Ingress.
+        annotations: {}
+        tls:
+          # -- Enable TLS on the UI Ingress.
+          enabled: false
+          # -- TLS secret for the UI host.
+          secretName: ""
+      auth:
+        # -- Use a pre-created basic-auth Secret (an `auth` key holding htpasswd
+        # lines). When set, `username`/`password` are ignored and no Secret is
+        # generated.
+        existingSecret: ""
+        # -- Basic-auth username for the generated htpasswd Secret.
+        username: "admin"
+        # -- Basic-auth password. Required when the UI Ingress is enabled and no
+        # `existingSecret` is given; the chart hashes it into an htpasswd Secret.
+        password: ""
+
 nats:
   config:
     jetstream:

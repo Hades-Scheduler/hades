@@ -26,15 +26,35 @@ Hades is configured entirely through environment variables (loaded via `caarlos0
 | `NATS_PASSWORD` | | NATS password (optional). |
 | `NATS_TLS_ENABLED` | `false` | Enable TLS for the NATS connection. |
 
+## Metrics (all components)
+
+Every service exposes a Prometheus `/metrics` endpoint on a dedicated, cluster-internal port (`METRICS_PORT`, default `8082`; the operator uses the `--metrics-bind-address` flag). It always includes Go runtime and process collectors, plus a few domain counters (`hades_build_requests_total`, `hades_jobs_enqueued_total`, `hades_jobs_scheduled_total`) and, for the operator, controller-runtime reconcile/workqueue metrics. The port is never routed through the public ingress; enable scraping by a Prometheus Operator with `--set monitoring.enabled=true`.
+
+## Overhead timing & tracing (all components)
+
+Hades measures how much overhead it adds around a job, per step and per phase, classifying every phase as `runtime` (the user's container executing) or `overhead` (Hades/Kubernetes coordination). One `shared/timing.JobTimer` drives three sinks:
+
+- **Logs** (always on): a debug-level event per phase and one info-level `job timing summary` per job (`overhead_ms`/`runtime_ms`/`wall_ms`/`overhead_pct`).
+- **Prometheus** (same `/metrics` endpoint): `hades_phase_seconds{executor,phase,kind}`, `hades_image_pull_seconds{executor,cached}`, and rollups `hades_job_overhead_seconds` / `hades_job_runtime_seconds` / `hades_job_wall_seconds`.
+- **OpenTelemetry traces** (opt-in): set `OTEL_EXPORTER_OTLP_ENDPOINT` to render each job as a waterfall across API → scheduler → operator. The trace context flows via the payload `traceparent` and the BuildJob `hades.tum.de/traceparent` annotation; unset leaves a zero-cost noop tracer.
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | | OTLP gRPC endpoint (e.g. `http://jaeger:4317`). Unset disables tracing. |
+| `OTEL_SERVICE_NAME` | per service | Overrides the service name shown in traces. |
+
+`make run` / `make docker-run` ship a Jaeger backend (UI on `http://localhost:16686`); in Kubernetes use `--set tracing.enabled=true` with `tracing.endpoint` or `tracing.deployJaeger=true`. The bundled Jaeger UI is ClusterIP by default (`kubectl port-forward svc/hades-jaeger 16686:16686`); to expose it, `tracing.jaeger.ui.ingress.enabled=true` renders an Ingress that is **always behind HTTP basic auth** (set `tracing.jaeger.ui.auth.password` or `...auth.existingSecret`; the chart refuses to render it unauthenticated). Docker phases are millisecond-precise; Kubernetes step phases are second-granular (Kubernetes truncates container timestamps to whole seconds).
+
 ## HadesAPI
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `API_PORT` | `8080` | Port the HTTP API listens on. |
+| `METRICS_PORT` | `8082` | Port the Prometheus `/metrics` endpoint listens on. |
 | `AUTH_KEY` | | HTTP Basic Auth key for the `hades` user. Empty disables auth. |
 
 :::note Reserved (not yet implemented)
-`PROMETHEUS_ADDRESS`, `RETENTION_IN_MIN`, `MAX_RETRIES`, and `TIMEOUT_IN_MIN` appear in `.env.example` but are **not read by any component today**. They are placeholders for planned features.
+`PROMETHEUS_ADDRESS`, `RETENTION_IN_MIN`, `MAX_RETRIES`, and `TIMEOUT_IN_MIN` appear in `.env.example` but are **not read by any component today**. They are placeholders for planned features. Prometheus metrics are served on `METRICS_PORT`, not `PROMETHEUS_ADDRESS`.
 :::
 
 ## HadesScheduler
@@ -42,6 +62,7 @@ Hades is configured entirely through environment variables (loaded via `caarlos0
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `CONCURRENCY` | `1` | Number of jobs processed concurrently. |
+| `METRICS_PORT` | `8082` | Port the Prometheus `/metrics` endpoint listens on. |
 | `HADES_EXECUTOR` | `docker` | Execution platform: `docker` or `k8s`. |
 
 Depending on `HADES_EXECUTOR`, the Docker or Kubernetes variables below also apply.
@@ -76,7 +97,7 @@ Only deployed when the scheduler runs in `operator` mode.
 | `MAX_PARALLELISM` | `100` | Maximum concurrent Jobs the operator admits; excess are suspended. |
 | `DEV_MODE` | `false` | Enable the controller-runtime development logger. |
 
-The operator also accepts standard controller-runtime flags: `--health-probe-bind-address` (default `:8083`), `--leader-elect`, and the metrics flags.
+The operator also accepts standard controller-runtime flags: `--health-probe-bind-address` (default `:8083`), `--metrics-bind-address` (default `:8082`, set `0` to disable), `--leader-elect`, and the log flags.
 
 ## HadesLogManager
 
@@ -85,6 +106,7 @@ Deployed by the Helm chart (`hades-log-manager`); also run locally via `make run
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `HADESLOGMANAGER_API_PORT` | `8081` | HTTP API port. |
+| `METRICS_PORT` | `8082` | Port the Prometheus `/metrics` endpoint listens on. |
 | `LOG_BATCH_SIZE` | `100` | Log entries buffered before a flush. |
 | `LOG_RETENTION` | `1h` | How long completed-job logs are kept in memory (Go duration). |
 | `MAX_JOB_LOGS` | `1000` | Max log entries retained per job. |

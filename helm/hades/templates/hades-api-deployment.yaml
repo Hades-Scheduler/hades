@@ -28,6 +28,8 @@ spec:
               memory: {{ .Values.hadesApi.resources.requests.memory | quote }}
           ports:
             - containerPort: {{ .Values.hadesApi.service.targetPort }}
+            - name: metrics
+              containerPort: {{ .Values.monitoring.port }}
           livenessProbe:
             httpGet:
               path: /ping
@@ -47,6 +49,8 @@ spec:
           env:
             - name: DEBUG
               value: {{ .Values.debug | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.monitoring.port | quote }}
             - name: NATS_URL
               value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
             # Deployed version shown in the dashboard header. Derived from the
@@ -101,3 +105,4 @@ spec:
               value: "true"
             {{- end }}
             {{- end }}
+            {{- include "hades.tracingEnv" . | nindent 12 }}

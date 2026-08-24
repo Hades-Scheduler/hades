@@ -363,8 +363,13 @@ Hades is configured through environment variables (or a `.env` file for local ru
 | `AUTH_KEY` | HTTP Basic Auth key for the API (empty = no auth) | `` |
 | `NATS_URL` | NATS server URL | `nats://localhost:4222` |
 | `DEBUG` | Verbose (debug-level) logging | `false` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint for tracing (empty = tracing off) | `` |
 
 See **[docs/configuration.md](./docs/configuration.md)** for the complete, per-component reference (Docker/Kubernetes executor, operator, and Log Manager options). A ready-to-copy `.env.example` lives at the repository root.
+
+### Measuring Hades overhead
+
+Hades instruments how much overhead it adds around each job, per step and per phase, splitting the wall-clock into `overhead` (Hades/Kubernetes coordination) and `runtime` (the user's container executing). Every service exposes Prometheus histograms (`hades_phase_seconds`, `hades_job_overhead_seconds`, …) on its `/metrics` port and logs a per-job `job timing summary` with `overhead_pct`. Setting `OTEL_EXPORTER_OTLP_ENDPOINT` additionally emits an OpenTelemetry trace per job - a waterfall across API → scheduler → operator. `make run` and `make docker-run` start a Jaeger UI on <http://localhost:16686>. See **[Overhead timing & tracing](./docs/configuration.md#overhead-timing--tracing-all-components)** for the full phase taxonomy.
 
 ## Development Workflow
 

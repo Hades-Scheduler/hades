@@ -22,9 +22,11 @@ spec:
           args:
             - "--leader-elect"
             - "--health-probe-bind-address=:8081"
+            - "--metrics-bind-address=:{{ .Values.monitoring.port }}"
           {{- else }}
           args:
             - "--health-probe-bind-address=:8081"
+            - "--metrics-bind-address=:{{ .Values.monitoring.port }}"
           {{- end }}
 
           ports:
@@ -32,6 +34,8 @@ spec:
               containerPort: {{ .Values.hadesOperator.service.targetPort }}
             - name: healthz
               containerPort: 8081
+            - name: metrics
+              containerPort: {{ .Values.monitoring.port }}
 
           env:
             - name: DEBUG
@@ -50,6 +54,7 @@ spec:
             - name: MAX_PARALLELISM
               value: {{ .Values.hadesOperator.maxParallelism | quote }}
             {{- end }}
+            {{- include "hades.tracingEnv" . | nindent 12 }}
 
           livenessProbe:
             httpGet:

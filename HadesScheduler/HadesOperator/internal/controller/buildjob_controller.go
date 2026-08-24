@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -259,6 +260,12 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				}
 				return ctrl.Result{}, err
 			}
+
+			// Emit the job's overhead/runtime breakdown, derived from the pod's
+			// container timestamps. This runs exactly once: setStatusCompleted has
+			// set the terminal phase, so the guard at the top of Reconcile
+			// short-circuits every later reconcile of this BuildJob.
+			r.emitJobTiming(ctx, &bj)
 
 			// All logs are published; stop tracking this job's streams.
 			r.logStreams().stopJob(bj.Namespace, bj.Name)
@@ -628,11 +635,32 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 	}
 }
 
+// validEnvName matches the names Kubernetes accepts for a container environment
+// variable: C_IDENTIFIER-ish, per the API server's own validation regex.
+var validEnvName = regexp.MustCompile(`^[-._a-zA-Z][-._a-zA-Z0-9]*$`)
+
 // envFromMeta converts a string map to []corev1.EnvVar for container env injection.
 // Keys are sorted so the generated env order is deterministic.
+//
+// Keys that Kubernetes would reject as environment variable names are skipped.
+// Job metadata is a general-purpose string map and Hades itself puts
+// domain-qualified keys in it - "hades.tum.de/priority" and
+// "hades.tum.de/priorityName" are injected by the NATS consumer for every job.
+// A "/" is legal in a label and legal in a Docker env name, but not in a
+// Kubernetes one, so passing them through made the API server reject the whole
+// Job: every job submitted with a priority failed to run on the Kubernetes
+// executor, while the same job ran fine on the Docker executor.
+//
+// Skipping rather than sanitising is deliberate: rewriting a key would invent
+// an env var the submitter never asked for and could silently collide with a
+// real one. The values are still available where they belong - priority is
+// carried as a Job/Pod label by the scheduler.
 func envFromMeta(m map[string]string) []corev1.EnvVar {
 	keys := make([]string, 0, len(m))
 	for k := range m {
+		if !validEnvName.MatchString(k) {
+			continue
+		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)

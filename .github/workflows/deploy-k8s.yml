@@ -13,7 +13,9 @@ name: Deploy to Kubernetes
 #   DASHBOARD_SESSION_SECRET  - dashboard session signing secret (>=32 chars)
 # The AUTH_KEY and dashboard values are materialised as in-cluster Secrets
 # (hades-auth, hades-dashboard) on every run; the first run creates them and later runs
-# keep them in sync.
+# keep them in sync. When the dashboard credentials are present, a matching
+# hades-jaeger-ui-auth Secret is also created so the Jaeger tracing UI (if enabled by
+# the values file) is protected by the same username/password as the dashboard.
 
 on:
   workflow_call:
@@ -99,6 +101,24 @@ jobs:
             --from-literal=DASHBOARD_PASSWORD_HASH="$DASHBOARD_PASSWORD_HASH" \
             --from-literal=DASHBOARD_SESSION_SECRET="$DASHBOARD_SESSION_SECRET" \
             --dry-run=client -o yaml | kubectl apply -f -
+          # Basic-auth Secret for the Jaeger tracing UI, reusing the dashboard
+          # credentials so the UI shares the dashboard's username/password. The
+          # value is an htpasswd line "<user>:<bcrypt-hash>"; the dashboard hash is
+          # bcrypt, which the ingress-nginx basic-auth handler accepts. Only created
+          # when the dashboard credentials exist; the chart consumes it via
+          # tracing.jaeger.ui.auth.existingSecret (test values enable this).
+          if [ -n "$DASHBOARD_USERNAME" ] && [ -n "$DASHBOARD_PASSWORD_HASH" ]; then
+            kubectl create secret generic hades-jaeger-ui-auth \
+              --namespace "$NAMESPACE" \
+              --from-literal=auth="${DASHBOARD_USERNAME}:${DASHBOARD_PASSWORD_HASH}" \
+              --dry-run=client -o yaml | kubectl apply -f -
+          else
+            # Fail closed: if dashboard credentials are removed, drop the stale
+            # basic-auth Secret so the Jaeger UI cannot keep accepting the old
+            # password.
+            kubectl delete secret hades-jaeger-ui-auth \
+              --namespace "$NAMESPACE" --ignore-not-found
+          fi
 
       - name: Apply CRDs
         # Helm does not upgrade CRDs after the first install, so apply them explicitly.

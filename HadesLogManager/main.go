@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	_ "github.com/hades-scheduler/hades/hadesLogManager/docs" // generated OpenAPI spec (make docs-api)
 	"github.com/hades-scheduler/hades/shared/buildlogs"
+	"github.com/hades-scheduler/hades/shared/metrics"
 	hadesnats "github.com/hades-scheduler/hades/shared/nats"
 	"github.com/hades-scheduler/hades/shared/utils"
 	"github.com/nats-io/nats.go"
@@ -29,8 +30,9 @@ const (
 
 // HadesLogManagerConfig holds the configuration for the log manager
 type HadesLogManagerConfig struct {
-	NatsConfig hadesnats.ConnectionConfig
-	APIPort    string `env:"HADESLOGMANAGER_API_PORT" envDefault:"8081"`
+	NatsConfig  hadesnats.ConnectionConfig
+	APIPort     string `env:"HADESLOGMANAGER_API_PORT" envDefault:"8081"`
+	MetricsPort string `env:"METRICS_PORT" envDefault:"8082"`
 }
 
 // @title                 HadesLogManager API
@@ -51,6 +53,7 @@ func main() {
 
 	slog.Info("HadesLogManager configuration",
 		"api_port", cfg.APIPort,
+		"metrics_port", cfg.MetricsPort,
 		"nats_url", cfg.NatsConfig.URL,
 		"nats_tls", cfg.NatsConfig.TLS,
 	)
@@ -151,6 +154,16 @@ func runWithGracefulShutdown(ctx context.Context, cancel context.CancelFunc, cfg
 	var wg sync.WaitGroup
 	errChan := make(chan error, 3)
 
+	// Start the Prometheus metrics server on a dedicated, cluster-internal port.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := metrics.Serve(ctx, ":"+cfg.MetricsPort); err != nil {
+			slog.Error("Metrics server failed", "error", err)
+			errChan <- err
+		}
+	}()
+
 	// Start the dynamic log manager
 	wg.Add(1)
 	go func() {
@@ -222,8 +235,10 @@ func waitForShutdown(ctx context.Context, cancel context.CancelFunc, server *htt
 	slog.Info("Starting graceful shutdown...")
 	cancel()
 
-	// Shutdown API server with timeout
-	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, shutdownTimeout)
+	// Shutdown API server with timeout. Derive from Background, not ctx: ctx was
+	// just cancelled above, so basing the timeout on it would make Shutdown return
+	// immediately instead of draining in-flight requests.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer shutdownCancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {

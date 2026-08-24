@@ -136,6 +136,10 @@
                 "timestamp": {
                     "description": "Job creation timestamp",
                     "type": "string"
+                },
+                "traceparent": {
+                    "description": "W3C trace context propagated from the API so scheduler/operator spans nest under the job trace. Not injected into containers.",
+                    "type": "string"
                 }
             }
         },

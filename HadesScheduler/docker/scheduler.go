@@ -17,6 +17,7 @@ import (
 	"github.com/hades-scheduler/hades/shared/buildstatus"
 	"github.com/hades-scheduler/hades/shared/payload"
 	"github.com/hades-scheduler/hades/shared/redact"
+	"github.com/hades-scheduler/hades/shared/timing"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 )
@@ -99,10 +100,29 @@ func (d *Scheduler) ScheduleJob(ctx context.Context, job payload.QueuePayload) e
 	jobLogger = slog.Default().With(slog.String("job_id", job.ID.String()))
 	containerLogsOptions = container.LogConfig{}
 
+	// Start the per-job timer, continuing the trace propagated from the API so
+	// this job's phase spans nest under it. queue_wait spans the API submission
+	// (job.Timestamp) to now; it crosses hosts, so a skewed clock is clamped to
+	// zero by Record.
+	traceCtx := ctx
+	if job.TraceParent != "" {
+		traceCtx = timing.Extract(ctx, map[string]string{"traceparent": job.TraceParent})
+	}
+	timer := timing.NewJobTimer(traceCtx, "docker", job.ID.String())
+	if !job.Timestamp.IsZero() {
+		timer.Record(0, timing.PhaseQueueWait, job.Timestamp, time.Now())
+	}
+	// Summary is registered first so it runs LAST (after the teardown defer
+	// below), including teardown in the rollup.
+	defer timer.Summary()
+
 	// Create a unique volume name for this job
 	volumeName := fmt.Sprintf("shared-%s", job.ID.String())
 	// Create the shared volume
-	if err := createSharedVolume(ctx, d.cli, volumeName); err != nil {
+	provisionStart := time.Now()
+	err := createSharedVolume(ctx, d.cli, volumeName)
+	timer.Record(0, timing.PhaseProvision, provisionStart, time.Now())
+	if err != nil {
 		jobLogger.Error("Failed to create shared volume", slog.Any("error", err))
 		return err
 	}
@@ -112,6 +132,7 @@ func (d *Scheduler) ScheduleJob(ctx context.Context, job payload.QueuePayload) e
 	// already been cancelled, e.g. during a graceful shutdown - otherwise the
 	// shared-<jobID> volume would leak.
 	defer func() {
+		teardownStart := time.Now()
 		// Give any auto-removing containers a moment to detach from the volume.
 		time.Sleep(500 * time.Millisecond)
 
@@ -119,10 +140,12 @@ func (d *Scheduler) ScheduleJob(ctx context.Context, job payload.QueuePayload) e
 		defer cancel()
 		if err := deleteSharedVolume(cleanupCtx, d.cli, volumeName); err != nil {
 			jobLogger.Error("Failed to delete shared volume", slog.Any("error", err))
+			timer.Record(0, timing.PhaseTeardown, teardownStart, time.Now())
 			return
 		}
 
 		jobLogger.Info("Volume deleted", slog.Any("volume", volumeName))
+		timer.Record(0, timing.PhaseTeardown, teardownStart, time.Now())
 	}()
 
 	// Add created volume to the job's docker config
@@ -135,6 +158,7 @@ func (d *Scheduler) ScheduleJob(ctx context.Context, job payload.QueuePayload) e
 		Options:      jobDockerConfig,
 		QueuePayload: job,
 		publisher:    d.logPublisher,
+		timer:        timer,
 	}
 
 	//block to send status first before execution
@@ -159,7 +183,7 @@ func (d *Scheduler) ScheduleJob(ctx context.Context, job payload.QueuePayload) e
 		defer cancel()
 	}
 
-	err := dockerJob.execute(execCtx)
+	err = dockerJob.execute(execCtx)
 	if err != nil {
 		// Surface why the job failed (e.g. an image pull error) to the dashboard.
 		// Redact secret-looking tokens and cap the length so a verbose daemon error

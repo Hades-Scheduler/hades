@@ -25,6 +25,8 @@ spec:
               memory: {{ .Values.hadesLogManager.resources.requests.memory | quote }}
           ports:
             - containerPort: {{ .Values.hadesLogManager.service.targetPort }}
+            - name: metrics
+              containerPort: {{ .Values.monitoring.port }}
           livenessProbe:
             httpGet:
               path: /health
@@ -44,6 +46,8 @@ spec:
           env:
             - name: DEBUG
               value: {{ .Values.debug | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.monitoring.port | quote }}
             - name: NATS_URL
               value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
             - name: HADESLOGMANAGER_API_PORT
@@ -62,3 +66,4 @@ spec:
               value: {{ .Values.hadesLogManager.statusWebhook.concurrency | quote }}
             - name: STATUS_WEBHOOK_MAX_PENDING
               value: {{ .Values.hadesLogManager.statusWebhook.maxPending | quote }}
+            {{- include "hades.tracingEnv" . | nindent 12 }}

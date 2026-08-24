@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/hades-scheduler/hades/hadesScheduler/log"
 	hades "github.com/hades-scheduler/hades/shared"
@@ -37,6 +38,14 @@ type K8sConfig struct {
 	// K8sNamespace is the namespace in which the jobs should be scheduled (default: hades-executor)
 	K8sNamespace string `env:"K8S_NAMESPACE,notEmpty" envDefault:"hades-executor"`
 }
+
+// Annotation keys set on the BuildJob so the operator can reconstruct job
+// timing it cannot observe itself: the API submission time (for queue_wait) and
+// the W3C trace context (so the operator's spans nest under the job trace).
+const (
+	AnnotationSubmittedAt = "hades.tum.de/submitted-at"
+	AnnotationTraceParent = "hades.tum.de/traceparent"
+)
 
 // BuildJobGVRConfig identifies the BuildJob custom resource (group/version/
 // resource) the operator-mode scheduler creates. Overridable via env for
@@ -160,6 +169,18 @@ func buildBuildJobObject(job payload.QueuePayload, namespace string) *unstructur
 		}
 	}
 
+	// Carry the submission time and trace context to the operator as annotations
+	// so it can compute queue_wait and nest its backdated step spans under the
+	// job trace. The trace context lives here, not in metadata, so it is never
+	// injected into a step container's environment.
+	annotations := map[string]interface{}{}
+	if !job.Timestamp.IsZero() {
+		annotations[AnnotationSubmittedAt] = job.Timestamp.Format(time.RFC3339Nano)
+	}
+	if job.TraceParent != "" {
+		annotations[AnnotationTraceParent] = job.TraceParent
+	}
+
 	steps := make([]map[string]interface{}, 0, len(job.Steps))
 	for _, s := range job.Steps {
 		sm := map[string]interface{}{
@@ -206,16 +227,23 @@ func buildBuildJobObject(job payload.QueuePayload, namespace string) *unstructur
 		spec["timeoutSeconds"] = job.TimeoutSeconds
 	}
 
+	metadata := map[string]interface{}{
+		"name":      job.ID.String(),
+		"namespace": namespace,
+		"labels":    labels,
+	}
+	// Only set annotations when there is something to carry, so the CR does not
+	// ship an empty "annotations": {} to the API server.
+	if len(annotations) > 0 {
+		metadata["annotations"] = annotations
+	}
+
 	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "build.hades.tum.de/v1",
 			"kind":       "BuildJob",
-			"metadata": map[string]interface{}{
-				"name":      job.ID.String(),
-				"namespace": namespace,
-				"labels":    labels,
-			},
-			"spec": spec,
+			"metadata":   metadata,
+			"spec":       spec,
 		},
 	}
 }

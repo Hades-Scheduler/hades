@@ -2,24 +2,30 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/hades-scheduler/hades/hadesScheduler/docker"
 	"github.com/hades-scheduler/hades/hadesScheduler/k8s"
 	"github.com/hades-scheduler/hades/hadesScheduler/log"
 	hades "github.com/hades-scheduler/hades/shared"
+	"github.com/hades-scheduler/hades/shared/metrics"
 	hadesnats "github.com/hades-scheduler/hades/shared/nats"
 	"github.com/hades-scheduler/hades/shared/payload"
+	"github.com/hades-scheduler/hades/shared/timing"
 	"github.com/hades-scheduler/hades/shared/utils"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // HadesSchedulerConfig holds the scheduler's runtime configuration. The
 // executor is selected separately via utils.ExecutorConfig (HADES_EXECUTOR).
 type HadesSchedulerConfig struct {
 	Concurrency uint `env:"CONCURRENCY" envDefault:"1"`
+	MetricsPort uint `env:"METRICS_PORT,notEmpty" envDefault:"8082"`
 	NatsConfig  hadesnats.ConnectionConfig
 }
 
@@ -41,6 +47,7 @@ func main() {
 	slog.Info("HadesScheduler configuration",
 		"executor", executorCfg.Executor,
 		"concurrency", cfg.Concurrency,
+		"metrics_port", cfg.MetricsPort,
 		"nats_url", cfg.NatsConfig.URL,
 		"nats_tls", cfg.NatsConfig.TLS,
 	)
@@ -115,14 +122,42 @@ func main() {
 		cancel()
 	}()
 
+	// Expose the phase-timing histograms on the default registry that
+	// metrics.Serve scrapes, and enable tracing (noop unless an OTLP endpoint is
+	// configured).
+	timing.MustRegister(prometheus.DefaultRegisterer)
+	tracingShutdown, err := timing.InitTracing(ctx, "hades-scheduler")
+	if err != nil {
+		slog.Error("Failed to init tracing", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tracingShutdown(shutdownCtx)
+	}()
+
+	// Prometheus metrics on a dedicated, cluster-internal port. This is the
+	// scheduler's only HTTP listener; it stops when the context is cancelled.
+	go func() {
+		// Metrics are auxiliary: log and keep scheduling jobs rather than taking
+		// the scheduler down (and skipping the deferred tracing/NATS shutdown that
+		// os.Exit from a goroutine would bypass).
+		if err := metrics.Serve(ctx, fmt.Sprintf(":%d", cfg.MetricsPort)); err != nil {
+			slog.Error("Metrics server failed; continuing without metrics", "error", err)
+		}
+	}()
+
 	consumer.DequeueJob(ctx, func(p payload.QueuePayload) {
 		slog.Info("Received job", "id", p.ID.String())
 		slog.Debug("Job payload", "payload", p)
 
 		if err := scheduler.ScheduleJob(ctx, p); err != nil {
 			slog.Error("Failed to schedule job", "error", err, "id", p.ID.String())
+			jobsScheduledTotal.WithLabelValues("error").Inc()
 			return
 		}
+		jobsScheduledTotal.WithLabelValues("success").Inc()
 		slog.Info("Successfully scheduled job", "id", p.ID.String())
 	})
 

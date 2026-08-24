@@ -13,6 +13,22 @@ hadesApi:
 ingress:
   host: hades-test.student.k8s.aet.cit.tum.de
 
+# Tracing is on in test: every service exports spans to a bundled in-cluster
+# Jaeger, whose UI is exposed behind HTTP basic auth. The basic-auth credentials
+# reuse the dashboard login (same username/password): the deploy workflow creates
+# the `hades-jaeger-ui-auth` htpasswd Secret from the dashboard secret.
+tracing:
+  enabled: true
+  deployJaeger: true
+  jaeger:
+    ui:
+      ingress:
+        enabled: true
+        # Requires a DNS record pointing at the cluster ingress.
+        host: hades-jaeger-test.student.k8s.aet.cit.tum.de
+      auth:
+        existingSecret: hades-jaeger-ui-auth
+
 nats:
   # values.yaml hardcodes the "hades" namespace in the NATS service FQDN, so the
   # test namespace must point at its own NATS release (hades-nats.<namespace>).

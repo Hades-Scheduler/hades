@@ -57,8 +57,14 @@ func TestConsumerConfigParsesDefaultsFromEmptyEnv(t *testing.T) {
 	// variable defined, and an explicit empty value is not an absent one.
 	for _, key := range []string{"CONCURRENCY", "NATS_ACK_WAIT", "NATS_MAX_DELIVER"} {
 		if old, ok := os.LookupEnv(key); ok {
-			t.Cleanup(func() { os.Setenv(key, old) })
-			os.Unsetenv(key)
+			t.Cleanup(func() {
+				if err := os.Setenv(key, old); err != nil {
+					t.Errorf("restoring %s: %v", key, err)
+				}
+			})
+		}
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unsetting %s: %v", key, err)
 		}
 	}
 

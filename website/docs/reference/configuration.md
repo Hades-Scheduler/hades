@@ -95,6 +95,8 @@ Only deployed when the scheduler runs in `operator` mode.
 | `WATCH_NAMESPACE` | | Namespace the operator watches (empty = all namespaces, subject to RBAC). |
 | `DELETE_ON_COMPLETE` | `true` | Delete the `BuildJob` CR (and its `Job`) once it finishes. |
 | `MAX_PARALLELISM` | `100` | Maximum concurrent Jobs the operator admits; excess are suspended. |
+| `REQUEUE_DELAY` | `2s` | How often the operator re-reconciles a running `BuildJob` (Go duration). Pods are not watched, so completion is detected on these requeues. A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. |
+| `LOG_DRAIN_TIMEOUT` | `45s` | How long a completed `BuildJob` is kept while its container logs drain, before it is deleted anyway (Go duration). A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. |
 | `DEV_MODE` | `false` | Enable the controller-runtime development logger. |
 
 The operator also accepts standard controller-runtime flags: `--health-probe-bind-address` (default `:8083`), `--metrics-bind-address` (default `:8082`, set `0` to disable), `--leader-elect`, and the log flags.

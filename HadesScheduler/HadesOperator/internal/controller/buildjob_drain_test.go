@@ -147,8 +147,8 @@ func TestJobCompletionTime(t *testing.T) {
 	t.Run("no info falls back to ~now (not already timed out)", func(t *testing.T) {
 		job := &batchv1.Job{}
 		got := jobCompletionTime(job)
-		if time.Since(got) > logDrainTimeout {
-			t.Errorf("jobCompletionTime() = %v is already older than logDrainTimeout", got)
+		if time.Since(got) > DefaultLogDrainTimeout {
+			t.Errorf("jobCompletionTime() = %v is already older than DefaultLogDrainTimeout", got)
 		}
 	})
 }

@@ -53,16 +53,21 @@ import (
 const conflictRequeueDelay = 200 * time.Millisecond
 const BuildStepPrefix = "step-%d"
 
-const requeueDelay = 2 * time.Second
+// DefaultRequeueDelay is the poll interval used when BuildJobReconciler.RequeueDelay
+// is not set to a positive value. The operator watches BuildJobs and the Jobs it
+// owns but not Pods, so container transitions and job completion are only observed
+// on these periodic requeues: this value bounds how late a completion is noticed.
+const DefaultRequeueDelay = 2 * time.Second
 
 // logDrainRequeueDelay is how long to wait before re-reconciling a completed
 // BuildJob whose terminated containers still have unpublished logs.
 const logDrainRequeueDelay = 1 * time.Second
 
-// logDrainTimeout bounds how long the operator keeps requeuing to drain logs
-// before it deletes a completed BuildJob anyway, to avoid an infinite requeue
-// when logs can never be published.
-const logDrainTimeout = 45 * time.Second
+// DefaultLogDrainTimeout is used when BuildJobReconciler.LogDrainTimeout is not
+// set to a positive value. It bounds how long the operator keeps requeuing to
+// drain logs before it deletes a completed BuildJob anyway, to avoid an infinite
+// requeue when logs can never be published.
+const DefaultLogDrainTimeout = 45 * time.Second
 
 const defaultPriority = 1
 
@@ -93,6 +98,13 @@ type BuildJobReconciler struct {
 	Publisher        *log.NATSPublisher
 	MaxParallelism   uint
 
+	// RequeueDelay is how long to wait before re-reconciling a BuildJob whose Job
+	// is still progressing. Zero or negative falls back to DefaultRequeueDelay.
+	RequeueDelay time.Duration
+	// LogDrainTimeout bounds how long a completed BuildJob is held while its
+	// container logs drain. Zero or negative falls back to DefaultLogDrainTimeout.
+	LogDrainTimeout time.Duration
+
 	// LogStreams tracks live per-container log-follow goroutines. It is created
 	// lazily by logStreams() if left nil.
 	LogStreams     *logStreamRegistry
@@ -108,6 +120,27 @@ func (r *BuildJobReconciler) logStreams() *logStreamRegistry {
 		}
 	})
 	return r.LogStreams
+}
+
+// requeueDelay returns the configured poll interval, falling back to the default
+// when unset or non-positive. A non-positive RequeueAfter would make
+// controller-runtime requeue immediately and busy-loop the controller.
+func (r *BuildJobReconciler) requeueDelay() time.Duration {
+	return positiveOrDefault(r.RequeueDelay, DefaultRequeueDelay)
+}
+
+// logDrainTimeout returns the configured log-drain safety valve, falling back to
+// the default when unset or non-positive.
+func (r *BuildJobReconciler) logDrainTimeout() time.Duration {
+	return positiveOrDefault(r.LogDrainTimeout, DefaultLogDrainTimeout)
+}
+
+// positiveOrDefault returns d when it is positive, otherwise fallback.
+func positiveOrDefault(d, fallback time.Duration) time.Duration {
+	if d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 // +kubebuilder:rbac:groups=build.hades.tum.de,resources=buildjobs;buildjobs/status;buildjobs/finalizers,verbs=get;list;watch;create;update;patch;delete
@@ -226,7 +259,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// Hold off finalizing (and deleting the pod) until every container's
 			// log stream has drained, so no tail logs are lost.
 			if draining {
-				return ctrl.Result{RequeueAfter: requeueDelay}, nil
+				return ctrl.Result{RequeueAfter: logDrainRequeueDelay}, nil
 			}
 
 			// Drain gate: when the CR (and thus the pod) will be deleted on
@@ -238,7 +271,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// logs are drained (or a safety valve fires).
 			if r.DeleteOnComplete {
 				drained, podGone, drainErr := r.logsDrained(ctx, &bj)
-				timedOut := time.Since(jobCompletionTime(&existingJob)) > logDrainTimeout
+				timedOut := time.Since(jobCompletionTime(&existingJob)) > r.logDrainTimeout()
 
 				if drainErr != nil && !timedOut {
 					return ctrl.Result{}, drainErr
@@ -307,7 +340,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// events between creation and completion. Periodic requeues are how the
 		// operator observes each container entering Running (to start its live log
 		// stream) and terminating (to finalize once its stream drains).
-		return ctrl.Result{RequeueAfter: requeueDelay}, nil
+		return ctrl.Result{RequeueAfter: r.requeueDelay()}, nil
 	}
 
 	if !apierrors.IsNotFound(err) {
@@ -358,7 +391,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: requeueDelay}, nil
+		return ctrl.Result{RequeueAfter: r.requeueDelay()}, nil
 	}
 
 	//3.4.2 Otherwise, set to Running
@@ -371,7 +404,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Requeue so the operator observes container transitions and drives live log
 	// streaming while the Job runs (Pods are not watched directly).
-	return ctrl.Result{RequeueAfter: requeueDelay}, nil
+	return ctrl.Result{RequeueAfter: r.requeueDelay()}, nil
 }
 
 // setStatusRunning sets BuildJob.Status to "Running", records StartTime and PodName.

@@ -57,6 +57,36 @@ type NSConfig struct {
 type OperatorConfig struct {
 	DeleteOnComplete bool `env:"DELETE_ON_COMPLETE" envDefault:"true"`
 	MaxParallelism   uint `env:"MAX_PARALLELISM" envDefault:"100"`
+	// RequeueDelay is how often the operator re-reconciles a BuildJob whose Job is
+	// still progressing. The operator watches BuildJobs and the Jobs it owns but
+	// not Pods, so container transitions and job completion are only observed on
+	// these requeues; this value bounds how late a completion is detected.
+	RequeueDelay time.Duration `env:"REQUEUE_DELAY" envDefault:"2s"`
+	// LogDrainTimeout bounds how long a completed BuildJob is held (undeleted) so
+	// Kubernetes can still serve its container logs, before it is deleted anyway.
+	LogDrainTimeout time.Duration `env:"LOG_DRAIN_TIMEOUT" envDefault:"45s"`
+}
+
+// normalize replaces non-positive tuning values with their defaults. A
+// non-positive requeue delay would make controller-runtime requeue immediately
+// and busy-loop the controller, and a non-positive drain timeout would defeat the
+// log-drain gate entirely.
+func (c *OperatorConfig) normalize() {
+	if c.MaxParallelism == 0 {
+		setupLog.WithValues("env", "MAX_PARALLELISM").
+			Info("MAX_PARALLELISM is 0; falling back to default", "fallback", DefaultMaxParallelism)
+		c.MaxParallelism = DefaultMaxParallelism
+	}
+	if c.RequeueDelay <= 0 {
+		setupLog.WithValues("env", "REQUEUE_DELAY").
+			Info("REQUEUE_DELAY is not positive; falling back to default", "fallback", controller.DefaultRequeueDelay)
+		c.RequeueDelay = controller.DefaultRequeueDelay
+	}
+	if c.LogDrainTimeout <= 0 {
+		setupLog.WithValues("env", "LOG_DRAIN_TIMEOUT").
+			Info("LOG_DRAIN_TIMEOUT is not positive; falling back to default", "fallback", controller.DefaultLogDrainTimeout)
+		c.LogDrainTimeout = controller.DefaultLogDrainTimeout
+	}
 }
 
 func init() {
@@ -99,11 +129,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if operatorConfig.MaxParallelism == 0 {
-		setupLog.WithValues("env", "MAX_PARALLELISM").
-			Info("MAX_PARALLELISM is 0 or invalid; falling back to default", "fallback", DefaultMaxParallelism)
-		operatorConfig.MaxParallelism = DefaultMaxParallelism
-	}
+	operatorConfig.normalize()
 
 	if nsConfig.WatchNamespace != "" {
 		setupLog.Info("scoping cache to a single namespace", "namespace", nsConfig.WatchNamespace)
@@ -179,6 +205,8 @@ func main() {
 		"cluster_wide", nsConfig.WatchNamespace == "",
 		"delete_on_complete", operatorConfig.DeleteOnComplete,
 		"max_parallelism", operatorConfig.MaxParallelism,
+		"requeue_delay", operatorConfig.RequeueDelay,
+		"log_drain_timeout", operatorConfig.LogDrainTimeout,
 		"metrics_addr", metricsAddr,
 		"dev_mode", enableDevMode,
 		"nats_url", natsConfig.URL,
@@ -209,6 +237,8 @@ func main() {
 		K8sClient:        kcs,
 		DeleteOnComplete: operatorConfig.DeleteOnComplete,
 		MaxParallelism:   operatorConfig.MaxParallelism,
+		RequeueDelay:     operatorConfig.RequeueDelay,
+		LogDrainTimeout:  operatorConfig.LogDrainTimeout,
 		Publisher:        publisher,
 		LogStreams:       controller.NewLogStreamRegistry(),
 	}).SetupWithManager(mgr); err != nil {

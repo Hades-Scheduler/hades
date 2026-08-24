@@ -47,8 +47,8 @@ spec:
             - name: NATS_URL
               value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
             # Reconcile tuning is independent of the watch scope, so unlike
-            # WATCH_NAMESPACE (and the DELETE_ON_COMPLETE/MAX_PARALLELISM pair
-            # below) these are injected in both namespaced and cluster-wide mode.
+            # WATCH_NAMESPACE below these are injected in both namespaced and
+            # cluster-wide mode.
             - name: REQUEUE_DELAY
               value: {{ .Values.hadesOperator.requeueDelay | quote }}
             - name: LOG_DRAIN_TIMEOUT

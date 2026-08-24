@@ -88,7 +88,7 @@ hadesScheduler:
   # jobs running concurrently on the Docker host. Raise it for `k8s` to keep the
   # scheduler from becoming the bottleneck under a burst; raise it for `docker`
   # only if the host can take the extra parallel containers.
-  concurrency: "4"
+  concurrency: "1"
 
 hadesOperator:
   image:

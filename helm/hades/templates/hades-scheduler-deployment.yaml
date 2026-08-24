@@ -37,6 +37,8 @@ spec:
               value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
             - name: HADES_EXECUTOR
               value: {{ .Values.hadesScheduler.executor }}
+            - name: CONCURRENCY
+              value: {{ .Values.hadesScheduler.concurrency | quote }}
             - name: K8S_NAMESPACE
               value: {{ .Release.Namespace }}
             {{- include "hades.tracingEnv" . | nindent 12 }}

@@ -78,6 +78,17 @@ hadesScheduler:
       memory: "256Mi"
   # -- Executor backend (`k8s` for in-cluster execution).
   executor: "k8s"
+  # -- Number of NATS consumer workers each scheduler pod runs. This is a
+  # per-replica setting, so the total number of workers consuming the queue is
+  # `concurrency * hadesScheduler.replicaCount`. The meaning depends on
+  # the executor: with `k8s` a worker only creates a `BuildJob` CR and returns, so
+  # this caps how fast queued jobs are turned into CRs (the operator's
+  # `hadesOperator.maxParallelism` remains the real limit on running Jobs); with
+  # `docker` a worker blocks for the entire job, so this *is* the maximum number of
+  # jobs running concurrently on the Docker host. Raise it for `k8s` to keep the
+  # scheduler from becoming the bottleneck under a burst; raise it for `docker`
+  # only if the host can take the extra parallel containers.
+  concurrency: "4"
 
 hadesOperator:
   image:

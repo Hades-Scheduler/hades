@@ -1,0 +1,61 @@
+{{- if and .Values.tracing.deployJaeger .Values.tracing.jaeger.ui.ingress.enabled }}
+{{- $ui := .Values.tracing.jaeger.ui }}
+{{- if not $ui.ingress.host }}
+{{- fail "tracing.jaeger.ui.ingress.enabled is true but tracing.jaeger.ui.ingress.host is empty" }}
+{{- end }}
+{{- if and $ui.ingress.tls.enabled (not $ui.ingress.tls.secretName) }}
+{{- fail "tracing.jaeger.ui.ingress.tls.enabled is true but tracing.jaeger.ui.ingress.tls.secretName is empty" }}
+{{- end }}
+{{- /* Resolve the basic-auth secret: a pre-created one, or generate from user/pass.
+       Fail closed so the UI is never exposed without authentication. */}}
+{{- $authSecret := $ui.auth.existingSecret }}
+{{- if not $authSecret }}
+{{- if not $ui.auth.password }}
+{{- fail "tracing.jaeger.ui.ingress.enabled is true: set tracing.jaeger.ui.auth.password (or tracing.jaeger.ui.auth.existingSecret) so the Jaeger UI is behind basic auth" }}
+{{- end }}
+{{- $authSecret = "hades-jaeger-ui-auth" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $authSecret | quote }}
+  labels:
+    app.kubernetes.io/part-of: hades
+type: Opaque
+data:
+  # htpasswd line consumed by the nginx ingress basic-auth annotation.
+  auth: {{ htpasswd $ui.auth.username $ui.auth.password | b64enc | quote }}
+---
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: "hades-jaeger-ui"
+  labels:
+    app.kubernetes.io/part-of: hades
+  annotations:
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: {{ $authSecret | quote }}
+    nginx.ingress.kubernetes.io/auth-realm: "Hades Jaeger UI"
+    {{- with $ui.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $ui.ingress.className }}
+  {{- if $ui.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $ui.ingress.host }}
+      secretName: {{ $ui.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ $ui.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: "hades-jaeger"
+                port:
+                  number: 16686
+{{- end }}

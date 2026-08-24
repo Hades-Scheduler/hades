@@ -20,6 +20,7 @@ import (
 	hades "github.com/hades-scheduler/hades/shared"
 	"github.com/hades-scheduler/hades/shared/buildstatus"
 	"github.com/hades-scheduler/hades/shared/payload"
+	"github.com/hades-scheduler/hades/shared/timing"
 	"github.com/hades-scheduler/hades/shared/utils"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
@@ -163,6 +164,7 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 	if err := c.ShouldBind(&p); err != nil {
 		msg := bindErrorMessage(err)
 		slog.Error("Failed to bind request payload", "error", err)
+		buildRequestsTotal.WithLabelValues("rejected").Inc()
 		c.String(http.StatusBadRequest, msg)
 		return
 	}
@@ -184,6 +186,7 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 			parsed, err := utils.ParseMemoryLimit(step.MemoryLimit)
 			if err != nil {
 				slog.Error("Failed to parse RAM limit", "error", err)
+				buildRequestsTotal.WithLabelValues("rejected").Inc()
 				c.String(http.StatusBadRequest, "Failed to parse RAM limit")
 				return
 			}
@@ -224,22 +227,43 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 	if p.QueuePayload.CallbackURL != "" {
 		if err := utils.ValidateCallbackURL(p.QueuePayload.CallbackURL); err != nil {
 			slog.Error("Invalid callback_url", "error", err)
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
 			c.String(http.StatusBadRequest, "Invalid callback_url: "+err.Error())
 			return
 		}
 	}
 
 	p.QueuePayload.ID = uuid.New()
+	// Stamp the server-side submission time so queue_wait (submit -> scheduler
+	// dequeue) is measured against a trusted clock rather than a client value.
+	p.QueuePayload.Timestamp = time.Now()
 	slog.Debug("Received build request ", "payload", SafePayloadFormat(p.QueuePayload))
 
 	queuePrio := hades.PriorityFromInt(p.Priority)
 
-	err := producer.EnqueueJobWithPriority(c.Request.Context(), p.QueuePayload, queuePrio)
+	// Open the job's root span and propagate its context in the payload so the
+	// scheduler/operator spans nest under it. Noop unless tracing is enabled.
+	// Always assign server-side (never conditionally): TraceParent is bound from
+	// the request body, so a client-supplied value must not survive into NATS and
+	// the BuildJob annotation when tracing is disabled and Inject returns nil.
+	spanCtx, endSpan := timing.StartSpan(c.Request.Context(), "hades.enqueue")
+	if carrier := timing.Inject(spanCtx); carrier != nil {
+		p.QueuePayload.TraceParent = carrier["traceparent"]
+	} else {
+		p.QueuePayload.TraceParent = ""
+	}
+	defer endSpan()
+
+	err := producer.EnqueueJobWithPriority(spanCtx, p.QueuePayload, queuePrio)
 	if err != nil {
 		slog.Error("Failed to enqueue job", "error", err)
+		buildRequestsTotal.WithLabelValues("rejected").Inc()
 		c.String(http.StatusInternalServerError, "Failed to enqueue job")
 		return
 	}
+
+	buildRequestsTotal.WithLabelValues("accepted").Inc()
+	jobsEnqueuedTotal.WithLabelValues(string(queuePrio)).Inc()
 
 	// Announce the job as Queued so lifecycle subscribers (HadesLogManager, the
 	// dashboard live feed) see it immediately. This is best-effort: a publish

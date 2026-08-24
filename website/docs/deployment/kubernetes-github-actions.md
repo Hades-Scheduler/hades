@@ -68,6 +68,34 @@ Non-secret differences live in committed values files, layered on top of `values
 
 Only credentials are stored as GitHub secrets.
 
+## Monitoring
+
+Every Hades service exposes a Prometheus `/metrics` endpoint on a dedicated,
+cluster-internal port (`8082` by default, `monitoring.port`). The endpoint is
+**never** routed through the public ingress. It always carries Go runtime and
+process metrics, plus a few domain counters (`hades_build_requests_total`,
+`hades_jobs_enqueued_total`, `hades_jobs_scheduled_total`) and, for the operator,
+controller-runtime reconcile/workqueue metrics.
+
+Registering these with a cluster Prometheus uses a `ServiceMonitor`, which is
+**off by default** so the chart installs cleanly whether or not the cluster runs
+the [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator).
+Enable it only once the operator's CRDs (`monitoring.coreos.com`) are present:
+
+```yaml
+# values-<env>.yaml
+monitoring:
+  enabled: true
+  serviceMonitor:
+    # Match the label your Prometheus uses to select ServiceMonitors.
+    labels:
+      release: kube-prometheus-stack
+```
+
+The rendered `ServiceMonitor` selects all Hades Services by
+`app.kubernetes.io/part-of: hades` and scrapes their `metrics` port. Verify the
+targets appear in Prometheus with `up{job=~"hades.*"} == 1`.
+
 ## Required secrets
 
 Add these to **each** GitHub environment (`k8s-prod` and `k8s-test`):

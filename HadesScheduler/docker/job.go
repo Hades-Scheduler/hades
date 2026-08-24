@@ -9,6 +9,7 @@ import (
 
 	"github.com/hades-scheduler/hades/shared/buildlogs"
 	"github.com/hades-scheduler/hades/shared/payload"
+	"github.com/hades-scheduler/hades/shared/timing"
 	"github.com/moby/moby/client"
 )
 
@@ -21,6 +22,7 @@ type Job struct {
 	Options
 	payload.QueuePayload
 	publisher buildlogs.LogPublisher
+	timer     *timing.JobTimer
 }
 
 type jobIDContextKey string
@@ -50,6 +52,7 @@ func (d Job) execute(ctx context.Context) error {
 			Options:   d.Options,
 			Step:      step,
 			publisher: d.publisher,
+			timer:     d.timer,
 		}
 
 		stepCtx := context.WithValue(ctx, jobIDContextKey("job_id"), d.ID.String())

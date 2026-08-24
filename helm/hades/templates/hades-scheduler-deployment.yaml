@@ -26,12 +26,17 @@ spec:
               memory: {{ .Values.hadesScheduler.resources.requests.memory | quote }}
           ports:
             - containerPort: {{ .Values.hadesScheduler.service.targetPort }}
+            - name: metrics
+              containerPort: {{ .Values.monitoring.port }}
           env:
             - name: DEBUG
               value: {{ .Values.debug | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.monitoring.port | quote }}
             - name: NATS_URL
               value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
             - name: HADES_EXECUTOR
               value: {{ .Values.hadesScheduler.executor }}
             - name: K8S_NAMESPACE
               value: {{ .Release.Namespace }}
+            {{- include "hades.tracingEnv" . | nindent 12 }}

@@ -11,9 +11,36 @@ import (
 	"github.com/hades-scheduler/hades/hadesScheduler/log"
 	"github.com/hades-scheduler/hades/shared/buildlogs"
 	"github.com/hades-scheduler/hades/shared/payload"
+	"github.com/hades-scheduler/hades/shared/timing"
 	"github.com/moby/moby/client"
 	"github.com/stretchr/testify/require"
 )
+
+// recordingTracer captures the phases recorded during a job so a test can assert
+// the executor instrumented every expected boundary.
+type recordingTracer struct {
+	mu  sync.Mutex
+	got map[timing.Phase]bool
+}
+
+func (r *recordingTracer) StartJob(ctx context.Context, _, _ string, _ time.Time) (context.Context, func()) {
+	return ctx, func() {}
+}
+
+func (r *recordingTracer) Phase(_ context.Context, phase timing.Phase, _, _ time.Time) {
+	r.mu.Lock()
+	if r.got == nil {
+		r.got = map[timing.Phase]bool{}
+	}
+	r.got[phase] = true
+	r.mu.Unlock()
+}
+
+func (r *recordingTracer) has(p timing.Phase) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.got[p]
+}
 
 // capturingPublisher records every Log handed to it so tests can assert on the
 // output that was demultiplexed from the container's log stream.
@@ -100,6 +127,46 @@ func TestScheduleJobSharesVolumeBetweenSteps(t *testing.T) {
 	require.Contains(t, strings.Join(publisher.messages(), "\n"), "hello-from-step-one")
 }
 
+// TestScheduleJobRecordsPhases asserts the executor records every phase of the
+// taxonomy for a successful step, from queue_wait through teardown, so the
+// overhead/runtime breakdown is complete.
+func TestScheduleJobRecordsPhases(t *testing.T) {
+	rec := &recordingTracer{}
+	timing.SetTracer(rec)
+	t.Cleanup(func() { timing.SetTracer(nil) })
+
+	scheduler := newTestScheduler(t, &capturingPublisher{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	job := payload.QueuePayload{
+		ID:        uuid.New(),
+		Name:      "phase-coverage-job",
+		Timestamp: time.Now().Add(-10 * time.Millisecond), // so queue_wait is recorded
+		Steps: []payload.Step{
+			{ID: 1, Image: testImage, Script: "echo hi"},
+		},
+	}
+
+	require.NoError(t, scheduler.ScheduleJob(ctx, job))
+
+	// queue_wait is intentionally not emitted as a span (it precedes the root
+	// span); it is still logged and metered. Every other phase is a span.
+	for _, p := range []timing.Phase{
+		timing.PhaseProvision,
+		timing.PhaseImagePull,
+		timing.PhaseContainerCreate,
+		timing.PhaseContainerStartup,
+		timing.PhaseContainerRun,
+		timing.PhaseLogDrain,
+		timing.PhaseContainerRemove,
+		timing.PhaseTeardown,
+	} {
+		require.Truef(t, rec.has(p), "phase %s was not recorded", p)
+	}
+}
+
 // TestScheduleJobFailsOnNonZeroExit asserts a failing step aborts the job.
 func TestScheduleJobFailsOnNonZeroExit(t *testing.T) {
 	publisher := &capturingPublisher{}
@@ -135,6 +202,10 @@ func TestScheduleJobTimesOut(t *testing.T) {
 	publisher := &capturingPublisher{}
 	scheduler := newTestScheduler(t, publisher)
 
+	rec := &recordingTracer{}
+	timing.SetTracer(rec)
+	t.Cleanup(func() { timing.SetTracer(nil) })
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -154,6 +225,10 @@ func TestScheduleJobTimesOut(t *testing.T) {
 	require.Error(t, err)
 	// The job must abort near the 2s deadline, not run the full 120s sleep.
 	require.Less(t, elapsed, 60*time.Second, "job did not abort at the timeout")
+
+	// The cancellation cleanup path must still record container_remove so a
+	// timed-out job's timing breakdown is complete.
+	require.True(t, rec.has(timing.PhaseContainerRemove), "container_remove not recorded on the timeout path")
 
 	// No container for this job may still be running: a cancelled ContainerWait
 	// does not stop the container, so the executor must force-remove it.

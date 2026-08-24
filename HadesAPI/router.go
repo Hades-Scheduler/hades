@@ -233,6 +233,15 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 		}
 	}
 
+	if p.QueuePayload.StatusCallbackURL != "" {
+		if err := utils.ValidateCallbackURL(p.QueuePayload.StatusCallbackURL); err != nil {
+			slog.Error("Invalid status_callback_url", "error", err)
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusBadRequest, "Invalid status_callback_url: "+err.Error())
+			return
+		}
+	}
+
 	p.QueuePayload.ID = uuid.New()
 	// Stamp the server-side submission time so queue_wait (submit -> scheduler
 	// dequeue) is measured against a trusted clock rather than a client value.

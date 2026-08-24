@@ -102,6 +102,7 @@ Submitted to `POST /build`. Field semantics come from `shared/payload/payload.go
 | `metadata` | map[string]string | no | Job-level metadata (also injected as environment variables). |
 | `steps` | `[]Step` | no | Ordered steps to execute. |
 | `callback_url` | string | no | Absolute http/https URL to forward aggregated logs/results to. |
+| `status_callback_url` | string | no | Absolute http/https URL that receives the job-status webhook when the job reaches a terminal status. Independent of `callback_url`; see [`HadesLogManager/Readme.md`](../HadesLogManager/Readme.md#job-status-webhook). |
 | `timeout_seconds` | int64 | no | Whole-job timeout in seconds. The job is killed and marked failed once exceeded. `0` (default) = no timeout. Enforced on both executors (Docker: context deadline; Kubernetes: Job `activeDeadlineSeconds`). |
 
 ### `Step`

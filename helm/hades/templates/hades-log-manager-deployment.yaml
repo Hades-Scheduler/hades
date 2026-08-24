@@ -52,4 +52,18 @@ spec:
               value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
             - name: HADESLOGMANAGER_API_PORT
               value: {{ .Values.hadesLogManager.service.targetPort | quote }}
+            - name: STATUS_WEBHOOK_ENABLED
+              value: {{ .Values.hadesLogManager.statusWebhook.enabled | quote }}
+            - name: STATUS_WEBHOOK_MAX_ATTEMPTS
+              value: {{ .Values.hadesLogManager.statusWebhook.maxAttempts | quote }}
+            - name: STATUS_WEBHOOK_TIMEOUT
+              value: {{ .Values.hadesLogManager.statusWebhook.timeout | quote }}
+            - name: STATUS_WEBHOOK_INITIAL_BACKOFF
+              value: {{ .Values.hadesLogManager.statusWebhook.initialBackoff | quote }}
+            - name: STATUS_WEBHOOK_MAX_BACKOFF
+              value: {{ .Values.hadesLogManager.statusWebhook.maxBackoff | quote }}
+            - name: STATUS_WEBHOOK_CONCURRENCY
+              value: {{ .Values.hadesLogManager.statusWebhook.concurrency | quote }}
+            - name: STATUS_WEBHOOK_MAX_PENDING
+              value: {{ .Values.hadesLogManager.statusWebhook.maxPending | quote }}
             {{- include "hades.tracingEnv" . | nindent 12 }}

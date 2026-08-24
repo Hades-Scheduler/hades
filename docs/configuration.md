@@ -135,7 +135,17 @@ Deployed by the Helm chart (`hades-log-manager`); also run locally via `make run
 | `LOG_BATCH_SIZE` | `100` | Log entries buffered before a flush. | `HadesLogManager/processor.go` (`AggregatorConfig`) |
 | `LOG_RETENTION` | `1h` | How long completed-job logs are kept in memory (Go duration). | `HadesLogManager/processor.go` |
 | `MAX_JOB_LOGS` | `1000` | Max log entries retained per job. | `HadesLogManager/processor.go` |
+| `STATUS_WEBHOOK_ENABLED` | `true` | Deliver the job-status webhook. Inert for jobs without a `status_callback_url`. | `HadesLogManager/status_webhook.go` (`StatusWebhookConfig`) |
+| `STATUS_WEBHOOK_MAX_ATTEMPTS` | `6` | Delivery attempts per job before the status event is dropped. | `HadesLogManager/status_webhook.go` |
+| `STATUS_WEBHOOK_TIMEOUT` | `10s` | Bound on a single delivery, including the callback-URL lookup. | `HadesLogManager/status_webhook.go` |
+| `STATUS_WEBHOOK_INITIAL_BACKOFF` | `5s` | Delay before the second attempt; doubles per attempt. | `HadesLogManager/status_webhook.go` |
+| `STATUS_WEBHOOK_MAX_BACKOFF` | `5m` | Ceiling for the retry delay. | `HadesLogManager/status_webhook.go` |
+| `STATUS_WEBHOOK_CONCURRENCY` | `16` | Deliveries in flight at once; keeps a dead receiver from delaying other jobs. | `HadesLogManager/status_webhook.go` |
+| `STATUS_WEBHOOK_MAX_PENDING` | `1000` | Status events awaiting acknowledgement (in flight or backing off). | `HadesLogManager/status_webhook.go` |
 
-Log forwarding is configured per job, not globally: set an optional `callback_url` (an absolute `http`/`https` URL with a host) on the build request and the Log Manager forwards that job's aggregated logs there. If omitted, the job's logs are not forwarded.
+Both outbound pushes are configured per job, not globally:
+
+- `callback_url` - an absolute `http`/`https` URL with a host. The Log Manager forwards that job's aggregated **logs** there once the log stream has drained. If omitted, the job's logs are not forwarded.
+- `status_callback_url` - an absolute `http`/`https` URL with a host. Receives the **job-status webhook** on the terminal status, independently of log forwarding. See [`HadesLogManager/Readme.md`](../HadesLogManager/Readme.md#job-status-webhook).
 
 Plus the [NATS](#nats-connection-all-components) and [global](#global-all-components) variables.

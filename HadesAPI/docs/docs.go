@@ -124,6 +124,11 @@ const docTemplate = `{
                     "description": "Priority level (1=low, 2=medium, 3+=high)",
                     "type": "integer"
                 },
+                "status_callback_url": {
+                    "description": "Optional per-job destination for the job-status webhook, sent when the job reaches a terminal status. Independent of callback_url. Delivery is at-least-once: a retry can repeat a notification, so receivers must deduplicate on job_id and handle it idempotently. Redirects are not followed. Must be an absolute http/https URL with a host.",
+                    "type": "string",
+                    "format": "uri"
+                },
                 "steps": {
                     "description": "Ordered list of steps to execute",
                     "type": "array",

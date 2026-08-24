@@ -7,6 +7,7 @@ package buildstatus
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // JobStatus is a point in a job's lifecycle. Its string value is capitalized and
@@ -57,9 +58,31 @@ func (js JobStatus) IsValid() bool {
 	}
 }
 
+// IsTerminal reports whether js ends a job's lifecycle. Succeeded, Failed, and
+// Stopped are terminal; Queued and Running are not.
+func (js JobStatus) IsTerminal() bool {
+	switch js {
+	case StatusSucceeded, StatusFailed, StatusStopped:
+		return true
+	default:
+		return false
+	}
+}
+
 // StatusSubject returns the NATS subject for publishing the given status.
 func StatusSubject(status JobStatus) string {
 	return fmt.Sprintf(StatusSubjectFormat, status)
+}
+
+// StatusFromSubject extracts the status token from a "hades.jobstatus.X"
+// subject. It returns the empty JobStatus when the subject has no trailing
+// token; callers should check IsValid on the result.
+func StatusFromSubject(subject string) JobStatus {
+	idx := strings.LastIndex(subject, ".")
+	if idx < 0 || idx == len(subject)-1 {
+		return JobStatus("")
+	}
+	return JobStatus(subject[idx+1:])
 }
 
 // FirstReason returns the first non-empty reason from a variadic reason list,
@@ -72,4 +95,24 @@ func FirstReason(reason ...string) string {
 		}
 	}
 	return ""
+}
+
+// MaxReasonLen is the hard upper bound, in runes, on a status reason. It keeps
+// a verbose executor or controller message within NATS header limits and stops
+// it bloating anything that forwards it onwards. TruncateReason never returns
+// more than this, ellipsis included.
+const MaxReasonLen = 500
+
+// TruncateReason shortens reason so the result is at most MaxReasonLen runes,
+// with the final rune replaced by an ellipsis to mark that content was dropped.
+// Publishers should apply it before attaching a reason to a status event, and
+// consumers that forward a reason outside the cluster should apply it again:
+// not every publisher does, so the cap only holds where the boundary that
+// depends on it enforces it. It is idempotent on an already-truncated value.
+func TruncateReason(reason string) string {
+	runes := []rune(reason)
+	if len(runes) <= MaxReasonLen {
+		return reason
+	}
+	return string(runes[:MaxReasonLen-1]) + "…"
 }

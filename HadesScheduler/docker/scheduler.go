@@ -22,10 +22,6 @@ import (
 	"github.com/moby/moby/client"
 )
 
-// maxStatusReasonLen caps the failure reason attached to a status event so a
-// verbose executor error stays within NATS header limits.
-const maxStatusReasonLen = 500
-
 // Options holds the per-scheduler Docker execution settings applied to every
 // step container (script shell, resource limits, autoremove, and the per-job
 // shared volume). Fields are set through the With* DockerOption builders.
@@ -199,9 +195,7 @@ func (d *Scheduler) ScheduleJob(ctx context.Context, job payload.QueuePayload) e
 		if job.TimeoutSeconds > 0 && execCtx.Err() != nil && ctx.Err() == nil {
 			reason = fmt.Sprintf("job timed out after %d seconds", job.TimeoutSeconds)
 		}
-		if runes := []rune(reason); len(runes) > maxStatusReasonLen {
-			reason = string(runes[:maxStatusReasonLen]) + "…"
-		}
+		reason = buildstatus.TruncateReason(reason)
 		// Publish with a fresh context: the job ctx may already be cancelled (on a
 		// timeout), which would otherwise drop the failure status.
 		if perr := d.statusPublisher.PublishJobStatus(context.WithoutCancel(ctx), buildstatus.StatusFailed, job.ID.String(), reason); perr != nil {

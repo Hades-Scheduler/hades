@@ -154,6 +154,23 @@ hadesLogManager:
       memory: "256Mi"
   # Where aggregated job logs are forwarded is configured per job via the
   # "callback_url" field on the build request, not globally on the log manager.
+  statusWebhook:
+    # -- Deliver the job-status webhook to each job's "status_callback_url". The
+    # feature is inert for jobs that do not set that field, so it is safe to leave
+    # enabled. The destination is per job; there is no global webhook URL.
+    enabled: true
+    # -- Delivery attempts per job (first try plus retries) before the status event is dropped.
+    maxAttempts: 6
+    # -- Bound on a single delivery, including the callback-URL lookup.
+    timeout: 10s
+    # -- Delay before the second attempt; doubles per attempt.
+    initialBackoff: 5s
+    # -- Ceiling for the retry delay.
+    maxBackoff: 5m
+    # -- Deliveries in flight at once; keeps one dead receiver from delaying other jobs.
+    concurrency: 16
+    # -- Status events awaiting acknowledgement (in flight or waiting out a retry backoff).
+    maxPending: 1000
 
 rbac:
   hadesScheduler:

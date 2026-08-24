@@ -86,12 +86,7 @@ func (r *jobRecord) dto() JobSummary {
 
 // isTerminal reports whether a status ends a job's lifecycle.
 func isTerminal(s buildstatus.JobStatus) bool {
-	switch s {
-	case buildstatus.StatusSucceeded, buildstatus.StatusFailed, buildstatus.StatusStopped:
-		return true
-	default:
-		return false
-	}
+	return s.IsTerminal()
 }
 
 // tracker holds recently-seen jobs in memory. It is fed by TrackEnqueue and by
@@ -294,9 +289,5 @@ func (t *tracker) enforceCapLocked() {
 
 // statusFromSubject extracts the status token from a "hades.jobstatus.X" subject.
 func statusFromSubject(subject string) buildstatus.JobStatus {
-	idx := strings.LastIndex(subject, ".")
-	if idx < 0 || idx == len(subject)-1 {
-		return buildstatus.JobStatus("")
-	}
-	return buildstatus.JobStatus(subject[idx+1:])
+	return buildstatus.StatusFromSubject(subject)
 }

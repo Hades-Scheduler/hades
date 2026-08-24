@@ -4,6 +4,7 @@
     "timestamp": "2021-01-01T00:00:00.000Z",
     "priority": 1,
     "callback_url": "http://localhost:8082/adapter/logs",
+    "status_callback_url": "http://localhost:8082/adapter/job-status",
     "timeout_seconds": 600,
     "steps" : [
         {

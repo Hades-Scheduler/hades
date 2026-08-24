@@ -101,6 +101,38 @@ func (s *ResolverSuite) TestMissingKeyIsNotAnError() {
 	assert.Equal(s.T(), "", url)
 }
 
+func (s *ResolverSuite) TestResolvesStatusCallbackURL() {
+	job := payload.QueuePayload{
+		ID:                uuid.New(),
+		Name:              "status job",
+		CallbackURL:       "https://example.com/adapter/logs",
+		StatusCallbackURL: "https://example.com/hades/status",
+	}
+	s.putJob(job)
+
+	info, err := s.resolver.JobInfo(context.Background(), job.ID.String())
+	require.NoError(s.T(), err)
+	assert.True(s.T(), info.Found)
+	assert.Equal(s.T(), "status job", info.Name)
+	assert.Equal(s.T(), "https://example.com/hades/status", info.StatusCallbackURL)
+}
+
+func (s *ResolverSuite) TestJobInfoWithoutStatusCallbackURL() {
+	job := payload.QueuePayload{ID: uuid.New(), Name: "logs only", CallbackURL: "https://example.com/adapter/logs"}
+	s.putJob(job)
+
+	info, err := s.resolver.JobInfo(context.Background(), job.ID.String())
+	require.NoError(s.T(), err)
+	assert.True(s.T(), info.Found)
+	assert.Equal(s.T(), "", info.StatusCallbackURL, "log forwarding must not double as a status webhook")
+}
+
+func (s *ResolverSuite) TestJobInfoForMissingKeyIsNotAnError() {
+	info, err := s.resolver.JobInfo(context.Background(), uuid.New().String())
+	require.NoError(s.T(), err)
+	assert.False(s.T(), info.Found)
+}
+
 func TestResolverSuite(t *testing.T) {
 	suite.Run(t, new(ResolverSuite))
 }

@@ -112,8 +112,35 @@ func run(cfg HadesLogManagerConfig) error {
 	// Create dynamic log manager
 	dynamicManager := NewDynamicLogManager(nc, consumer, logAggregator)
 
+	// Create the job-status webhook dispatcher. It is independent of the log
+	// forwarding path above: it reacts to the terminal status event itself, so a
+	// job's outcome is announced without waiting for the log consumer to drain.
+	var webhookCfg StatusWebhookConfig
+	if err := utils.LoadConfig(&webhookCfg); err != nil {
+		return fmt.Errorf("loading status webhook configuration: %w", err)
+	}
+	// Normalize before logging, not just inside the dispatcher: an operator
+	// reading this line during an incident must see the values actually in
+	// effect. An invalid env var would otherwise be echoed back verbatim while
+	// the dispatcher quietly ran on the repaired ones.
+	webhookCfg = webhookCfg.normalized()
+	slog.Info("Status webhook configuration",
+		"enabled", webhookCfg.Enabled,
+		"max_attempts", webhookCfg.MaxAttempts,
+		"timeout", webhookCfg.Timeout,
+		"initial_backoff", webhookCfg.InitialBackoff,
+		"max_backoff", webhookCfg.MaxBackoff,
+		"concurrency", webhookCfg.Concurrency,
+		"max_pending", webhookCfg.MaxPending,
+	)
+
+	var dispatcher *StatusWebhookDispatcher
+	if webhookCfg.Enabled {
+		dispatcher = NewStatusWebhookDispatcher(js, resolver, nil, webhookCfg)
+	}
+
 	// Set up graceful shutdown
-	return runWithGracefulShutdown(ctx, cancel, cfg, dynamicManager, logAggregator)
+	return runWithGracefulShutdown(ctx, cancel, cfg, dynamicManager, logAggregator, dispatcher)
 }
 
 // connectNATS establishes connection to NATS server
@@ -122,10 +149,15 @@ func connectNATS(config hadesnats.ConnectionConfig) (*nats.Conn, error) {
 }
 
 // runWithGracefulShutdown starts services and handles graceful shutdown
-func runWithGracefulShutdown(ctx context.Context, cancel context.CancelFunc, cfg HadesLogManagerConfig, dynamicManager buildlogs.LogManager, logAggregator buildlogs.LogAggregator,
+func runWithGracefulShutdown(ctx context.Context, cancel context.CancelFunc, cfg HadesLogManagerConfig, dynamicManager buildlogs.LogManager, logAggregator buildlogs.LogAggregator, dispatcher *StatusWebhookDispatcher,
 ) error {
 	var wg sync.WaitGroup
-	errChan := make(chan error, 3)
+	// One slot per goroutine started below (metrics, dynamic log manager, status
+	// webhook dispatcher, API server). The buffer must never be smaller than the
+	// number of senders: each sends before its deferred wg.Done() runs, so a
+	// blocked send would leave wg.Wait() hanging forever. Shutdown on a signal
+	// drains nothing from this channel, so the buffer alone has to absorb them.
+	errChan := make(chan error, 4)
 
 	// Start the Prometheus metrics server on a dedicated, cluster-internal port.
 	wg.Add(1)
@@ -148,6 +180,20 @@ func runWithGracefulShutdown(ctx context.Context, cancel context.CancelFunc, cfg
 			errChan <- err
 		}
 	}()
+
+	// Start the job-status webhook dispatcher, if enabled.
+	if dispatcher != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			slog.Info("Starting status webhook dispatcher")
+
+			if err := dispatcher.Run(ctx); err != nil {
+				slog.Error("Status webhook dispatcher failed", "error", err)
+				errChan <- err
+			}
+		}()
+	}
 
 	// Start API server
 	router := setupAPIRoute(logAggregator)

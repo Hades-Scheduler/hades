@@ -180,6 +180,57 @@ are not forwarded.
 }
 ```
 
+#### Job-status webhook (`status_callback_url`)
+
+`callback_url` forwards **logs**. It is not a completion signal: its body is a bare
+JSON array of log lines with no status, no exit code, and no timestamps, so a
+receiver cannot tell a passing job from a failing one, and it is only sent after
+the Log Manager has drained the job's JetStream log consumer (bounded by a 30 s
+drain timeout that grows with log volume).
+
+To be told **that a job finished and how it ended**, set the separate optional
+top-level `status_callback_url`. Both fields are independent: a job may set
+either, both, or neither, and existing `callback_url` behaviour is unchanged.
+
+```json
+{
+  "name": "Example Job",
+  "callback_url": "http://localhost:8082/adapter/logs",
+  "status_callback_url": "http://localhost:8082/adapter/job-status",
+  "steps": [
+    {
+      "id": 1,
+      "name": "Hello World",
+      "image": "alpine:latest",
+      "script": "echo 'Hello, Hades!'"
+    }
+  ]
+}
+```
+
+Hades POSTs a single JSON object as soon as the job reaches a terminal status
+(`Succeeded`, `Failed`, or `Stopped`), without waiting for the log drain:
+
+```json
+{
+  "event": "job.completed",
+  "job_id": "7f3a1c2b-...",
+  "name": "Example Job",
+  "status": "Failed",
+  "reason": "ImagePullBackOff: ...",
+  "queued_at": "2026-08-21T12:00:00Z",
+  "started_at": "2026-08-21T12:00:05Z",
+  "finished_at": "2026-08-21T12:00:41Z",
+  "duration_ms": 36000,
+  "attempt": 1
+}
+```
+
+Delivery is **at-least-once**: a failed delivery is retried with exponential
+backoff and `attempt` counts up, so receivers must deduplicate on `job_id`. See
+[`HadesLogManager/Readme.md`](HadesLogManager/Readme.md#job-status-webhook) for
+the full schema, delivery guarantees, and configuration.
+
 ### Multi-Step Job Example
 
 For more complex workflows, you can define multi-step jobs where each step runs in a different container:

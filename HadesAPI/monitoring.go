@@ -34,22 +34,35 @@ func SafePayloadFormat[T PayloadInput](input T) string {
 	return ""
 }
 
+// stripURLSecrets removes userinfo, query, and fragment from raw so credentials
+// or tokens carried there never reach a log line. url.Parse is permissive and
+// rarely fails, but when it does the value is dropped entirely rather than
+// logged as-is: a string that cannot be parsed cannot be sanitized, and an
+// empty log field is preferable to leaking an unknown one.
+func stripURLSecrets(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 func sanitizeAndMarshal(job payload.QueuePayload) string {
 	// Drop all metadata (keys and values) before logging; key names add no
 	// value to log output. The dashboard uses redact.Redactor instead, which
 	// keeps keys but masks sensitive values. Drop returns a deep copy, so the
 	// caller's payload is left untouched.
 	job = redact.Drop(job)
-	// Strip any credentials/query/fragment from the callback URL so tokens
+	// Strip any credentials/query/fragment from the callback URLs so tokens
 	// carried there don't leak into logs.
-	if job.CallbackURL != "" {
-		if u, err := url.Parse(job.CallbackURL); err == nil {
-			u.User = nil
-			u.RawQuery = ""
-			u.Fragment = ""
-			job.CallbackURL = u.String()
-		}
-	}
+	job.CallbackURL = stripURLSecrets(job.CallbackURL)
+	job.StatusCallbackURL = stripURLSecrets(job.StatusCallbackURL)
 	jsonTmp, err := json.Marshal(job)
 	if err != nil {
 		slog.Error("Failed to marshal sanitized payload", "error", err)

@@ -246,13 +246,13 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 	// Always assign server-side (never conditionally): TraceParent is bound from
 	// the request body, so a client-supplied value must not survive into NATS and
 	// the BuildJob annotation when tracing is disabled and Inject returns nil.
-spanCtx, endSpan := timing.StartSpan(c.Request.Context(), "hades.enqueue")
-if carrier := timing.Inject(spanCtx); carrier != nil {
-	p.QueuePayload.TraceParent = carrier["traceparent"]
-} else {
-	p.QueuePayload.TraceParent = ""
-}
-defer endSpan()
+	spanCtx, endSpan := timing.StartSpan(c.Request.Context(), "hades.enqueue")
+	if carrier := timing.Inject(spanCtx); carrier != nil {
+		p.QueuePayload.TraceParent = carrier["traceparent"]
+	} else {
+		p.QueuePayload.TraceParent = ""
+	}
+	defer endSpan()
 
 	err := producer.EnqueueJobWithPriority(spanCtx, p.QueuePayload, queuePrio)
 	if err != nil {

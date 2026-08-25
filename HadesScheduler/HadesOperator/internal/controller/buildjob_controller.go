@@ -546,8 +546,17 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		}
 
 		c := corev1.Container{
-			Name:         fmt.Sprintf(BuildStepPrefix, s.ID),
-			Image:        s.Image,
+			Name:  fmt.Sprintf(BuildStepPrefix, s.ID),
+			Image: s.Image,
+			// Match the Docker executor, which sets the working directory to the
+			// shared volume for every step (HadesScheduler/docker/step.go).
+			// Without this the container starts in whatever WORKDIR its image
+			// declares, so an identical job document resolves relative paths
+			// differently on the two executors: with alpine (WORKDIR /) a step
+			// ran in / here and in /shared under Docker, and with an image
+			// declaring WORKDIR /app it would run in /app. That silently breaks
+			// the promise that the same job runs unmodified on either executor.
+			WorkingDir:   sharedMount.MountPath,
 			Env:          envFromMeta(env),
 			VolumeMounts: []corev1.VolumeMount{sharedMount},
 		}

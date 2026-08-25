@@ -53,6 +53,8 @@ spec:
               value: {{ .Values.hadesOperator.requeueDelay | quote }}
             - name: LOG_DRAIN_TIMEOUT
               value: {{ .Values.hadesOperator.logDrainTimeout | quote }}
+            - name: FINALIZER_IMAGE
+              value: {{ .Values.hadesOperator.finalizerImage | quote }}
             {{- if not .Values.hadesOperator.clusterWide }}
             - name: WATCH_NAMESPACE
               value: {{ default .Release.Namespace .Values.hadesOperator.targetNamespace | quote }}

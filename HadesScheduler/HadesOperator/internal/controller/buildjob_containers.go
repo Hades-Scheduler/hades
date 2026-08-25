@@ -18,10 +18,10 @@ import (
 
 const FinalizerContainerName = "buildjob-finalizer"
 
-// FinalizerImage is the image for the pod's main container. Every BuildJob pod
-// needs one, because Kubernetes requires at least one non-init container; the
-// steps themselves run as init containers, so this one only has to exit 0 once
-// they are done.
+// DefaultFinalizerImage is the image for the pod's main container. Every
+// BuildJob pod needs one, because Kubernetes requires at least one non-init
+// container; the steps themselves run as init containers, so this one only has
+// to exit 0 once they are done.
 //
 // Pinned to an explicit patch tag rather than left bare. An untagged image
 // resolves to ":latest", which Kubernetes special-cases to
@@ -29,7 +29,11 @@ const FinalizerContainerName = "buildjob-finalizer"
 // of every job for an image that is almost certainly already on the node. It
 // also means the container silently changes whenever upstream republishes the
 // tag, which is not a property a build system's own machinery should have.
-const FinalizerImage = "busybox:1.37.0"
+//
+// Override with FINALIZER_IMAGE (chart: hadesOperator.finalizerImage) when the
+// cluster cannot reach Docker Hub, or to point at a mirror. The image needs
+// nothing but a shell: it runs `sh -c "echo build finished"`.
+const DefaultFinalizerImage = "busybox:1.37.0"
 
 // helper: build a configured PodLogReader for the given namespace/job.
 func (r *BuildJobReconciler) podLogReader(namespace, jobID string) k8s.PodLogReader {

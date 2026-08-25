@@ -57,7 +57,7 @@ func TestBuildK8sJob_ContinueOnError(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
 
 	// Normal step: run the script directly so a failure fails the container.
 	normal := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, 1))
@@ -107,7 +107,7 @@ func TestBuildK8sJob_JobMetadataInjected(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
 	c := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, 1))
 
 	wants := map[string]string{
@@ -147,7 +147,7 @@ func TestBuildK8sJob_NoDuplicateStepScriptEnv(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
 	c := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, 1))
 
 	if n := envCount(c, "HADES_STEP_SCRIPT"); n != 1 {
@@ -173,7 +173,7 @@ func TestBuildK8sJob_ActiveDeadlineSeconds(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
 	if job.Spec.ActiveDeadlineSeconds == nil {
 		t.Fatalf("ActiveDeadlineSeconds not set, want %d", timeout)
 	}
@@ -193,7 +193,7 @@ func TestBuildK8sJob_NoTimeoutLeavesDeadlineUnset(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
 	if job.Spec.ActiveDeadlineSeconds != nil {
 		t.Errorf("ActiveDeadlineSeconds = %v, want nil", *job.Spec.ActiveDeadlineSeconds)
 	}
@@ -226,7 +226,7 @@ func TestBuildK8sJob_StepsRunInSharedVolume(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
 
 	for _, id := range []int{1, 2} {
 		c := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, id))
@@ -268,7 +268,7 @@ func TestBuildK8sJob_FinalizerImageIsPinnedAndNotAlwaysPulled(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
 
 	var found bool
 	for _, c := range job.Spec.Template.Spec.Containers {
@@ -297,4 +297,55 @@ func TestBuildK8sJob_FinalizerImageIsPinnedAndNotAlwaysPulled(t *testing.T) {
 	if !found {
 		t.Fatalf("no %s container in the pod spec", FinalizerContainerName)
 	}
+}
+
+// The finalizer image must be overridable, and an unset or blank value must
+// fall back to the default rather than producing a pod with an empty image
+// (which the API server rejects for every job).
+func TestBuildJobReconciler_FinalizerImageFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  string
+		want string
+	}{
+		{"unset", "", DefaultFinalizerImage},
+		{"blank", "   ", DefaultFinalizerImage},
+		{"override", "registry.internal/busybox:1.36", "registry.internal/busybox:1.36"},
+	} {
+		r := &BuildJobReconciler{FinalizerImage: tc.set}
+		if got := r.finalizerImage(); got != tc.want {
+			t.Errorf("%s: finalizerImage() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// An overridden image must actually reach the rendered pod, not just the
+// accessor.
+func TestBuildK8sJob_HonoursFinalizerImageOverride(t *testing.T) {
+	bj := &buildv1.BuildJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "job-1"},
+		Spec: buildv1.BuildJobSpec{
+			Name:  "job-1",
+			Steps: []buildv1.BuildStep{{ID: 1, Name: "s", Image: "alpine", Script: "true"}},
+		},
+	}
+
+	const custom = "registry.internal/busybox:1.36"
+	job := buildK8sJob(bj, "job-1", true, false, custom)
+
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.Name == FinalizerContainerName {
+			if c.Image != custom {
+				t.Errorf("finalizer image = %q, want %q", c.Image, custom)
+			}
+			// The pull policy must stay explicit whatever the image is: an
+			// override ending in :latest must not silently reintroduce Always.
+			if c.ImagePullPolicy != corev1.PullIfNotPresent {
+				t.Errorf("finalizer imagePullPolicy = %q, want %q",
+					c.ImagePullPolicy, corev1.PullIfNotPresent)
+			}
+			return
+		}
+	}
+	t.Fatalf("no %s container in the pod spec", FinalizerContainerName)
 }

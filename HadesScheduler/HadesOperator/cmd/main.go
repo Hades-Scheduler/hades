@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hades-scheduler/hades/hadesScheduler/log"
@@ -65,6 +66,11 @@ type OperatorConfig struct {
 	// LogDrainTimeout bounds how long a completed BuildJob is held (undeleted) so
 	// Kubernetes can still serve its container logs, before it is deleted anyway.
 	LogDrainTimeout time.Duration `env:"LOG_DRAIN_TIMEOUT" envDefault:"45s"`
+	// FinalizerImage is the image for the main container of every BuildJob pod.
+	// Kubernetes requires at least one non-init container and the steps run as
+	// init containers, so this one only has to run `sh -c "echo build finished"`.
+	// Override it for clusters that cannot reach Docker Hub, or to use a mirror.
+	FinalizerImage string `env:"FINALIZER_IMAGE" envDefault:"busybox:1.37.0"`
 }
 
 // normalize replaces non-positive tuning values with their defaults. A
@@ -86,6 +92,11 @@ func (c *OperatorConfig) normalize() {
 		setupLog.WithValues("env", "LOG_DRAIN_TIMEOUT").
 			Info("LOG_DRAIN_TIMEOUT is not positive; falling back to default", "fallback", controller.DefaultLogDrainTimeout)
 		c.LogDrainTimeout = controller.DefaultLogDrainTimeout
+	}
+	if strings.TrimSpace(c.FinalizerImage) == "" {
+		setupLog.WithValues("env", "FINALIZER_IMAGE").
+			Info("FINALIZER_IMAGE is empty; falling back to default", "fallback", controller.DefaultFinalizerImage)
+		c.FinalizerImage = controller.DefaultFinalizerImage
 	}
 }
 
@@ -207,6 +218,7 @@ func main() {
 		"max_parallelism", operatorConfig.MaxParallelism,
 		"requeue_delay", operatorConfig.RequeueDelay,
 		"log_drain_timeout", operatorConfig.LogDrainTimeout,
+		"finalizer_image", operatorConfig.FinalizerImage,
 		"metrics_addr", metricsAddr,
 		"dev_mode", enableDevMode,
 		"nats_url", natsConfig.URL,
@@ -239,6 +251,7 @@ func main() {
 		MaxParallelism:   operatorConfig.MaxParallelism,
 		RequeueDelay:     operatorConfig.RequeueDelay,
 		LogDrainTimeout:  operatorConfig.LogDrainTimeout,
+		FinalizerImage:   operatorConfig.FinalizerImage,
 		Publisher:        publisher,
 		LogStreams:       controller.NewLogStreamRegistry(),
 	}).SetupWithManager(mgr); err != nil {

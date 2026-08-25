@@ -150,7 +150,7 @@ jobs:
                     image: "ghcr.io/hades-scheduler/hades/junit-result-parser:latest",
                     metadata: {
                       API_ENDPOINT: $result_endpoint,
-                      INGEST_DIR: "./shared/example",
+                      INGEST_DIR: "./example",
                       HADES_TEST_PATH: "./example",
                       HADES_ASSIGNMENT_PATH: "./example/assignment"
                     }

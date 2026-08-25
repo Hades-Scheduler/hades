@@ -197,3 +197,51 @@ func TestBuildK8sJob_NoTimeoutLeavesDeadlineUnset(t *testing.T) {
 		t.Errorf("ActiveDeadlineSeconds = %v, want nil", *job.Spec.ActiveDeadlineSeconds)
 	}
 }
+
+// Every step container must start in the shared volume, matching the Docker
+// executor (HadesScheduler/docker/step.go sets WorkingDir: "/shared").
+//
+// Without this the container inherits whatever WORKDIR its image declares, and
+// an identical job document resolves relative paths differently depending on
+// which executor runs it. That is how the repository's own benchmark payload
+// came to carry INGEST_DIR="./shared/example": correct here, where alpine's
+// WORKDIR is "/", and silently wrong under Docker, where it resolved to
+// /shared/shared/example and the result parser ingested nothing while still
+// exiting 0.
+//
+// The images are chosen to make the failure visible: an image declaring a
+// non-root WORKDIR would previously start somewhere else entirely.
+func TestBuildK8sJob_StepsRunInSharedVolume(t *testing.T) {
+	bj := &buildv1.BuildJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "job-1"},
+		Spec: buildv1.BuildJobSpec{
+			Name: "job-1",
+			Steps: []buildv1.BuildStep{
+				{ID: 1, Name: "scripted", Image: "alpine", Script: "echo hi"},
+				// No script: runs the image entrypoint, which is exactly the
+				// case the result parser hits.
+				{ID: 2, Name: "entrypoint", Image: "ghcr.io/example/parser"},
+			},
+		},
+	}
+
+	job := buildK8sJob(bj, "job-1", true, false)
+
+	for _, id := range []int{1, 2} {
+		c := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, id))
+		if c.WorkingDir != "/shared" {
+			t.Errorf("step %d WorkingDir = %q, want %q", id, c.WorkingDir, "/shared")
+		}
+		// The working directory is only meaningful if the volume is mounted
+		// there, so pin the pair together.
+		var mounted bool
+		for _, m := range c.VolumeMounts {
+			if m.MountPath == "/shared" {
+				mounted = true
+			}
+		}
+		if !mounted {
+			t.Errorf("step %d has WorkingDir /shared but no volume mounted there", id)
+		}
+	}
+}

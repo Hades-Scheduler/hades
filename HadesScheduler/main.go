@@ -104,6 +104,7 @@ func main() {
 			docker.WithContainerAutoremove(dockerCfg.ContainerAutoremove),
 			docker.WithCPULimit(dockerCfg.CPULimit),
 			docker.WithMemoryLimit(dockerCfg.MemoryLimit),
+			docker.WithImagePullPolicy(dockerCfg.ImagePullPolicy),
 			docker.WithLogPublisher(publisher),
 			docker.WithStatusPublisher(publisher),
 		)

@@ -81,3 +81,18 @@ func WithMemoryLimit(memoryLimit string) DockerOption {
 		return nil
 	}
 }
+
+// WithImagePullPolicy sets whether steps contact the registry for images that
+// are already present locally. See PullPolicy. An unrecognised value fails the
+// scheduler's construction rather than falling back to a default, so a
+// misconfigured policy is reported at startup instead of quietly doing nothing.
+func WithImagePullPolicy(policy string) DockerOption {
+	return func(s *Scheduler) error {
+		p, err := ParsePullPolicy(policy)
+		if err != nil {
+			return err
+		}
+		s.imagePullPolicy = p
+		return nil
+	}
+}

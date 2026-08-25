@@ -32,6 +32,7 @@ type Options struct {
 	memoryLimit          string
 	volumeName           string
 	containerLogsOptions container.LogConfig
+	imagePullPolicy      PullPolicy
 }
 
 // Scheduler runs jobs on the local Docker daemon and publishes their logs and
@@ -77,6 +78,10 @@ func NewDefaultScheduler() (*Scheduler, error) {
 		containerAutoremove: false,
 		cpuLimit:            0,
 		memoryLimit:         "",
+		// Defaults to the historical behaviour: pull on every step. A scheduler
+		// built programmatically without options must not silently become less
+		// safe than one built before this setting existed.
+		imagePullPolicy: PullAlways,
 	}
 
 	scheduler := &Scheduler{

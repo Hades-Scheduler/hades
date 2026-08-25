@@ -75,6 +75,7 @@ Depending on `HADES_EXECUTOR`, the Docker or Kubernetes variables below also app
 | -------- | ------- | ----------- |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon endpoint. |
 | `DOCKER_CONTAINER_AUTOREMOVE` | `false` | Auto-remove step containers after they exit. |
+| `DOCKER_IMAGE_PULL_POLICY` | `always` | Whether a step contacts the registry for an image already present locally: `always`, `if-not-present`, or `never`. `always` is the default and the only safe choice for mutable tags, but it is not free on a cache hit (~2.2s per step for a small image). Use `if-not-present` when images are referenced immutably. |
 | `DOCKER_SCRIPT_EXECUTOR` | `/bin/bash -c` | Shell used to run each step's `script`. |
 | `DOCKER_CPU_LIMIT` | | Default CPU limit (whole CPUs) when a step sets none. |
 | `DOCKER_MEMORY_LIMIT` | | Default memory limit (e.g. `4g`) when a step sets none. |

@@ -619,12 +619,21 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		initCtrs = append(initCtrs, c)
 	}
 
-	// Add a dummy container that runs after all init containers have finished
+	// Add a dummy container that runs after all init containers have finished.
+	//
+	// The tag and the pull policy are both explicit, and both matter. An
+	// untagged image means ":latest", and Kubernetes forces
+	// imagePullPolicy: Always for ":latest" - so every single build job made a
+	// registry round trip for this container even though the image was already
+	// on the node. It is the same defect the Docker executor had before #512,
+	// where a cached pull cost ~2.2s per step; here it was once per job, on the
+	// critical path, for a container that echoes one line.
 	dummy := corev1.Container{
-		Name:         FinalizerContainerName,
-		Image:        "busybox",
-		Command:      []string{"sh", "-c", "echo build finished"},
-		VolumeMounts: []corev1.VolumeMount{sharedMount},
+		Name:            FinalizerContainerName,
+		Image:           FinalizerImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{"sh", "-c", "echo build finished"},
+		VolumeMounts:    []corev1.VolumeMount{sharedMount},
 	}
 
 	podSpec := corev1.PodSpec{

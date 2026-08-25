@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	buildv1 "github.com/hades-scheduler/hades/HadesScheduler/HadesOperator/api/v1"
@@ -243,5 +244,57 @@ func TestBuildK8sJob_StepsRunInSharedVolume(t *testing.T) {
 		if !mounted {
 			t.Errorf("step %d has WorkingDir /shared but no volume mounted there", id)
 		}
+	}
+}
+
+// The pod's main container must be pinned and must not re-pull on every job.
+//
+// An untagged image resolves to ":latest", and Kubernetes forces
+// imagePullPolicy: Always for ":latest" regardless of what the node already
+// has. That put a registry round trip on the critical path of every build job -
+// verified on a running cluster, where the rendered pod spec showed
+// `image=busybox pullPolicy=Always` while `busybox:latest` was already present
+// in the node's containerd store.
+//
+// Both halves are asserted: a tag alone would still be re-pulled if someone
+// later dropped the explicit policy, and an explicit policy alone would still
+// leave the image floating.
+func TestBuildK8sJob_FinalizerImageIsPinnedAndNotAlwaysPulled(t *testing.T) {
+	bj := &buildv1.BuildJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "job-1"},
+		Spec: buildv1.BuildJobSpec{
+			Name:  "job-1",
+			Steps: []buildv1.BuildStep{{ID: 1, Name: "s", Image: "alpine", Script: "true"}},
+		},
+	}
+
+	job := buildK8sJob(bj, "job-1", true, false)
+
+	var found bool
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.Name != FinalizerContainerName {
+			continue
+		}
+		found = true
+
+		if !strings.Contains(c.Image, ":") {
+			t.Errorf("finalizer image %q has no tag; Kubernetes treats that as "+
+				":latest and forces imagePullPolicy: Always", c.Image)
+		}
+		if strings.HasSuffix(c.Image, ":latest") {
+			t.Errorf("finalizer image %q is :latest; Kubernetes forces "+
+				"imagePullPolicy: Always for that tag", c.Image)
+		}
+		if c.ImagePullPolicy == corev1.PullAlways {
+			t.Errorf("finalizer imagePullPolicy is Always, so every job pays a " +
+				"registry round trip for a container that echoes one line")
+		}
+		if c.ImagePullPolicy == "" {
+			t.Errorf("finalizer imagePullPolicy is unset; it must be explicit so " +
+				"the effective policy does not depend on how the tag is spelled")
+		}
+	}
+	if !found {
+		t.Fatalf("no %s container in the pod spec", FinalizerContainerName)
 	}
 }

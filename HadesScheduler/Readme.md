@@ -10,6 +10,12 @@ The scheduler subscribes to the priority-bucketed job subjects (`hades.jobs.{hig
 NATS (hades.jobs.*) ──► HadesScheduler ──► executor ──► containers (one per step)
 ```
 
+### Job leases and redelivery
+
+A pulled job stays leased until it is acknowledged. Because the Docker executor blocks for the whole job, the worker signals `InProgress` to JetStream every few seconds while the job runs, which keeps resetting the `NATS_ACK_WAIT` timer. A job is therefore only redelivered when the worker itself stops responding (crash, OOM kill, pod eviction, network partition) - never because it runs for a long time, including a job running all the way to its `timeout_seconds`.
+
+`NATS_MAX_DELIVER` (default `3`) bounds how often a job that keeps taking down its worker is retried. The last delivery is not executed: it publishes a terminal `Failed` status (with a reason explaining the redeliveries) and drops the job, so a poisonous job neither loops forever nor disappears without a status.
+
 ## Executors
 
 ### Docker (`HADES_EXECUTOR=docker`) - local development
@@ -22,7 +28,7 @@ The scheduler creates a `BuildJob` custom resource; the [HadesOperator](HadesOpe
 
 ## Configuration
 
-Common variables: `HADES_EXECUTOR` (default `docker`), `CONCURRENCY` (default `1`), `NATS_URL`, and the executor-specific `DOCKER_*` or `K8S_*` variables. See [docs/configuration.md](../docs/configuration.md) for the complete list.
+Common variables: `HADES_EXECUTOR` (default `docker`), `CONCURRENCY` (default `1`), `NATS_URL`, `NATS_ACK_WAIT` (default `1m`), `NATS_MAX_DELIVER` (default `3`), and the executor-specific `DOCKER_*` or `K8S_*` variables. See [docs/configuration.md](../docs/configuration.md) for the complete list.
 
 ## Run locally
 

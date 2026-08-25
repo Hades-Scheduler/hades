@@ -106,7 +106,15 @@ func (hp *HadesNATSPublisher) EnqueueJobWithPriority(ctx context.Context, queueP
 // subject "hades.jobstatus.{status}". Subscribers such as HadesLogManager use
 // these events to track a job's lifecycle. Nothing publishes the Queued status
 // today except the API on enqueue, so this completes the lifecycle feed.
-func (hp *HadesNATSPublisher) PublishJobStatus(ctx context.Context, jobStatus buildstatus.JobStatus, jobID string, reason ...string) error {
+func (hp *HadesNATSPublisher) PublishJobStatus(_ context.Context, jobStatus buildstatus.JobStatus, jobID string, reason ...string) error {
+	return publishJobStatus(hp.natsConnection, jobStatus, jobID, reason...)
+}
+
+// publishJobStatus publishes a status transition on the core-NATS status
+// subject "hades.jobstatus.{status}". It backs HadesNATSPublisher's
+// StatusPublisher implementation and is also used by the consumer to report a
+// job it gives up on, so both report failures the same way.
+func publishJobStatus(nc *nats.Conn, jobStatus buildstatus.JobStatus, jobID string, reason ...string) error {
 	if jobID == "" {
 		return fmt.Errorf("empty job ID")
 	}
@@ -120,7 +128,7 @@ func (hp *HadesNATSPublisher) PublishJobStatus(ctx context.Context, jobStatus bu
 	if r := buildstatus.FirstReason(reason...); r != "" {
 		msg.Header = nats.Header{buildstatus.ReasonHeader: []string{r}}
 	}
-	if err := hp.natsConnection.PublishMsg(msg); err != nil {
+	if err := nc.PublishMsg(msg); err != nil {
 		return fmt.Errorf("publishing job status %s for job %s: %w", jobStatus, jobID, err)
 	}
 	slog.Debug("Published job status", "job_id", jobID, "status", jobStatus, "subject", subject)

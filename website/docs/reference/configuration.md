@@ -62,6 +62,8 @@ Hades measures how much overhead it adds around a job, per step and per phase, c
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `CONCURRENCY` | `1` | Number of jobs processed concurrently. |
+| `NATS_ACK_WAIT` | `1m` | How long JetStream waits for an ack before redelivering a job to another worker. A liveness backstop, not a job-duration budget: a worker signals progress while a job runs, so long jobs are never redelivered while the worker is alive. Minimum `300ms`: the heartbeat targets `AckWait/3` but is clamped to a `100ms` floor, so shorter values leave fewer than three ticks per ack window and lose the margin that absorbs a delayed or dropped heartbeat. |
+| `NATS_MAX_DELIVER` | `3` | Maximum number of deliveries per job. The last delivery is spent publishing a terminal `Failed` status and dropping the job, so the default allows two execution attempts. Must be at least `2` - the scheduler refuses to start otherwise. |
 | `METRICS_PORT` | `8082` | Port the Prometheus `/metrics` endpoint listens on. |
 | `HADES_EXECUTOR` | `docker` | Execution platform: `docker` or `k8s`. |
 

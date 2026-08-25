@@ -78,7 +78,7 @@ The bundled Jaeger UI Service is cluster-internal (ClusterIP) by default, so you
 
 Plus the [NATS](#nats-connection-all-components) and [global](#global-all-components) variables.
 
-> **Reserved (not yet implemented):** `PROMETHEUS_ADDRESS`, `RETENTION_IN_MIN`, `MAX_RETRIES`, and `TIMEOUT_IN_MIN` appear in `.env.example` and some compose files but are **not read by any component today**. They are placeholders for planned features and currently have no effect. (Note: a per-job timeout *is* supported, but it is set on the job payload as `timeout_seconds`, not via this env var - see [API: `Step`/`QueuePayload`](./api.md#queuepayload).)
+> **Reserved (not yet implemented):** `PROMETHEUS_ADDRESS`, `RETENTION_IN_MIN`, `MAX_RETRIES`, and `TIMEOUT_IN_MIN` appear in `.env.example` and some compose files but are **not read by any component today**. They are placeholders for planned features and currently have no effect. (Note: a per-job timeout *is* supported, but it is set on the job payload as `timeout_seconds`, not via this env var - see [API: `Step`/`QueuePayload`](./api.md#queuepayload). How often a job is retried after its worker died is bounded by the scheduler's `NATS_MAX_DELIVER`, not by `MAX_RETRIES`.)
 >
 > **Per-job/per-step resource controls** are set on the job payload, not via environment variables: `timeout_seconds` (job), and per-step `cpu_limit`, `memory_limit`, `network`, `memory_swap`, `pids_limit`. Timeout, CPU, memory and environment variables are enforced on both executors; `network`, `memory_swap` and `pids_limit` are Docker-executor only (Kubernetes has no per-container swap/PID field, and a pod's containers share one network namespace). See [api.md](./api.md#step).
 
@@ -86,7 +86,9 @@ Plus the [NATS](#nats-connection-all-components) and [global](#global-all-compon
 
 | Variable | Default | Description | Source |
 | -------- | ------- | ----------- | ------ |
-| `CONCURRENCY` | `1` | Number of jobs processed concurrently. | `HadesScheduler/main.go` (`HadesSchedulerConfig`) |
+| `CONCURRENCY` | `1` | Number of jobs processed concurrently. | `shared/nats/consumer.go` (`ConsumerConfig`) |
+| `NATS_ACK_WAIT` | `1m` | How long JetStream waits for an ack before redelivering a job to another worker. This is a liveness backstop, **not** a job-duration budget: a worker signals progress every few seconds while a job runs, so jobs of any length (including ones running to their `timeout_seconds`) are never redelivered while the worker is alive. Lower it for faster recovery after a scheduler crash, raise it if the network is flaky. Minimum `300ms`: the heartbeat targets `AckWait/3` so three ticks fall inside each ack window, but it is clamped to a `100ms` floor. Below `300ms` that clamp leaves fewer than three ticks per window and erodes the margin that absorbs a delayed or dropped heartbeat; below `100ms` the first heartbeat arrives after `AckWait` has elapsed and a running job is redelivered. | `shared/nats/consumer.go` (`ConsumerConfig`) |
+| `NATS_MAX_DELIVER` | `3` | Maximum number of times a single job is delivered. The last delivery is not executed: it is used to publish a terminal `Failed` status and drop the job, so the default allows two execution attempts before Hades gives up on a job that keeps crashing or stalling its worker. Must be at least `2`; the scheduler refuses to start otherwise, because `1` would spend the only delivery on the failure report and never execute a job. | `shared/nats/consumer.go` (`ConsumerConfig`) |
 | `METRICS_PORT` | `8082` | Port the Prometheus `/metrics` endpoint listens on (see [Metrics](#metrics-all-components)). | `HadesScheduler/main.go` (`HadesSchedulerConfig`) |
 | `HADES_EXECUTOR` | `docker` | Execution platform: `docker` or `k8s`. | `shared/utils/config.go` (`ExecutorConfig`) |
 

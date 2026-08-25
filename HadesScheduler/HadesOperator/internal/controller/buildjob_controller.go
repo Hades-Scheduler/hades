@@ -105,6 +105,10 @@ type BuildJobReconciler struct {
 	// container logs drain. Zero or negative falls back to DefaultLogDrainTimeout.
 	LogDrainTimeout time.Duration
 
+	// FinalizerImage is the image for the pod's main container. Empty falls back
+	// to DefaultFinalizerImage.
+	FinalizerImage string
+
 	// LogStreams tracks live per-container log-follow goroutines. It is created
 	// lazily by logStreams() if left nil.
 	LogStreams     *logStreamRegistry
@@ -133,6 +137,17 @@ func (r *BuildJobReconciler) requeueDelay() time.Duration {
 // the default when unset or non-positive.
 func (r *BuildJobReconciler) logDrainTimeout() time.Duration {
 	return positiveOrDefault(r.LogDrainTimeout, DefaultLogDrainTimeout)
+}
+
+// finalizerImage returns the configured image for the pod's main container,
+// falling back to the default when unset. Whitespace-only is treated as unset:
+// an empty image would be rejected by the API server for every job, which is a
+// worse failure than ignoring a blank setting.
+func (r *BuildJobReconciler) finalizerImage() string {
+	if strings.TrimSpace(r.FinalizerImage) == "" {
+		return DefaultFinalizerImage
+	}
+	return r.FinalizerImage
 }
 
 // positiveOrDefault returns d when it is positive, otherwise fallback.
@@ -356,7 +371,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	shouldSuspend := active >= r.MaxParallelism
 
 	// 3.1 Create Kubernetes Job (initContainers = bj.Spec.Steps)
-	k8sJob := buildK8sJob(&bj, jobName, r.DeleteOnComplete, shouldSuspend)
+	k8sJob := buildK8sJob(&bj, jobName, r.DeleteOnComplete, shouldSuspend, r.finalizerImage())
 
 	// 3.2 Set OwnerReference
 	if err := controllerutil.SetControllerReference(&bj, k8sJob, r.Scheme); err != nil {
@@ -521,7 +536,7 @@ func (r *BuildJobReconciler) setStatusPending(ctx context.Context, nn types.Name
 }
 
 // buildK8sJob creates a one-time Job with InitContainers that execute each Step in order
-func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, suspend bool) *batchv1.Job {
+func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, suspend bool, finalizerImage string) *batchv1.Job {
 	sharedVolName := "shared"
 	sharedMount := corev1.VolumeMount{Name: sharedVolName, MountPath: "/shared"}
 
@@ -619,12 +634,21 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		initCtrs = append(initCtrs, c)
 	}
 
-	// Add a dummy container that runs after all init containers have finished
+	// Add a dummy container that runs after all init containers have finished.
+	//
+	// The tag and the pull policy are both explicit, and both matter. An
+	// untagged image means ":latest", and Kubernetes forces
+	// imagePullPolicy: Always for ":latest" - so every single build job made a
+	// registry round trip for this container even though the image was already
+	// on the node. It is the same defect the Docker executor had before #512,
+	// where a cached pull cost ~2.2s per step; here it was once per job, on the
+	// critical path, for a container that echoes one line.
 	dummy := corev1.Container{
-		Name:         FinalizerContainerName,
-		Image:        "busybox",
-		Command:      []string{"sh", "-c", "echo build finished"},
-		VolumeMounts: []corev1.VolumeMount{sharedMount},
+		Name:            FinalizerContainerName,
+		Image:           finalizerImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{"sh", "-c", "echo build finished"},
+		VolumeMounts:    []corev1.VolumeMount{sharedMount},
 	}
 
 	podSpec := corev1.PodSpec{

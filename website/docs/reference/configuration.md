@@ -100,6 +100,7 @@ Only deployed when the scheduler runs in `operator` mode.
 | `MAX_PARALLELISM` | `100` | Maximum concurrent Jobs the operator admits; excess are suspended. |
 | `REQUEUE_DELAY` | `2s` | How often the operator re-reconciles a running `BuildJob` (Go duration). Pods are not watched, so completion is detected on these requeues. A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. |
 | `LOG_DRAIN_TIMEOUT` | `45s` | How long a completed `BuildJob` is kept while its container logs drain, before it is deleted anyway (Go duration). A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. |
+| `FINALIZER_IMAGE` | `busybox:1.37.0` | Image for the main container of every `BuildJob` pod; it only runs `sh -c "echo build finished"`. Override for clusters without Docker Hub access. Keep it pinned - an untagged image means `:latest`, which Kubernetes forces to `imagePullPolicy: Always`. |
 | `DEV_MODE` | `false` | Enable the controller-runtime development logger. |
 
 The operator also accepts standard controller-runtime flags: `--health-probe-bind-address` (default `:8083`), `--metrics-bind-address` (default `:8082`, set `0` to disable), `--leader-elect`, and the log flags.

@@ -142,6 +142,16 @@ hadesOperator:
   # true. A zero or negative duration falls back to the default; a value that is
   # not a valid Go duration fails operator startup.
   logDrainTimeout: "45s"
+  # -- Image for the main container of every BuildJob pod. Kubernetes requires at
+  # least one non-init container and the build steps run as init containers, so
+  # this one exists only to exit once they are done: it runs
+  # `sh -c "echo build finished"` and needs nothing but a shell.
+  # Override it for clusters that cannot reach Docker Hub, or to point at a
+  # mirror. Keep it pinned to an explicit tag - an untagged image resolves to
+  # ":latest", which Kubernetes special-cases to imagePullPolicy: Always, adding
+  # a registry round trip to every job for an image the node already has.
+  # Empty falls back to the operator's built-in default.
+  finalizerImage: "busybox:1.37.0"
 
 hadesLogManager:
   image:

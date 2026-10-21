@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -153,19 +153,17 @@ type webhookSender interface {
 	Send(ctx context.Context, url string, event JobStatusEvent) error
 }
 
-// maxDrainedResponseBytes bounds how much of a webhook response body is read
-// before closing it. Draining is what lets the connection be reused; the body
-// itself is never parsed.
-const maxDrainedResponseBytes = 64 << 10
-
 // httpWebhookSender POSTs the event as JSON over HTTP.
 type httpWebhookSender struct {
 	client *http.Client
 }
 
-func newHTTPWebhookSender(timeout time.Duration) *httpWebhookSender {
+// newHTTPWebhookSender builds a sender bounded by timeout. transport may be nil,
+// in which case http.DefaultTransport is used.
+func newHTTPWebhookSender(timeout time.Duration, transport http.RoundTripper) *httpWebhookSender {
 	return &httpWebhookSender{client: &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: transport,
 		// Do not follow redirects. Go's default policy turns a 301/302/303 into a
 		// GET and drops the body, so a receiver that redirects would answer 200
 		// while never seeing the event - a delivery reported as successful that
@@ -201,13 +199,7 @@ func (s *httpWebhookSender) Send(ctx context.Context, url string, event JobStatu
 	if err != nil {
 		return fmt.Errorf("sending status webhook: %w", err)
 	}
-	defer func() {
-		// Drain a bounded prefix before closing so the connection can go back to
-		// the keep-alive pool instead of being torn down on every delivery. The
-		// limit keeps a chatty receiver from making this read unbounded.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainedResponseBytes))
-		_ = resp.Body.Close()
-	}()
+	defer drainAndClose(resp)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("status webhook endpoint returned %s", resp.Status)
@@ -334,19 +326,23 @@ func (t *lifecycleTracker) sweepLoop(ctx context.Context) {
 	}
 }
 
-// evictOldestLocked drops least-recently-updated entries while the map exceeds
-// its cap. The caller must hold the lock.
+// evictOldestLocked bounds the map once it grows past twice its cap, evicting
+// the least recently updated entries back down to the cap in one sorted pass.
+// The 2x hysteresis means a tracker sitting at its cap does not rescan the whole
+// map on every insert. The caller must hold the lock.
 func (t *lifecycleTracker) evictOldestLocked() {
-	for len(t.entries) > t.maxSize {
-		var oldestID string
-		var oldest time.Time
-		first := true
-		for id, entry := range t.entries {
-			if first || entry.updatedAt.Before(oldest) {
-				oldestID, oldest, first = id, entry.updatedAt, false
-			}
-		}
-		delete(t.entries, oldestID)
+	if len(t.entries) <= 2*t.maxSize {
+		return
+	}
+	ids := make([]string, 0, len(t.entries))
+	for id := range t.entries {
+		ids = append(ids, id)
+	}
+	slices.SortFunc(ids, func(a, b string) int {
+		return t.entries[a].updatedAt.Compare(t.entries[b].updatedAt)
+	})
+	for _, id := range ids[:len(ids)-t.maxSize] {
+		delete(t.entries, id)
 	}
 }
 

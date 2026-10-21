@@ -91,30 +91,14 @@ func run(cfg HadesLogManagerConfig) error {
 	if err != nil {
 		return fmt.Errorf("creating JetStream context: %w", err)
 	}
-	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "HADES_JOBS"})
+	kv, err := js.CreateOrUpdateKeyValue(ctx, hadesnats.JobsKVConfig())
 	if err != nil {
 		return fmt.Errorf("binding HADES_JOBS KV store: %w", err)
 	}
 	resolver := newKVCallbackResolver(kv)
 
-	// Create log aggregator
-	var aggregatorConfig AggregatorConfig
-	if err := utils.LoadConfig(&aggregatorConfig); err != nil {
-		return fmt.Errorf("loading aggregator configuration: %w", err)
-	}
-	slog.Info("Log aggregator configuration",
-		"batch_size", aggregatorConfig.BatchSize,
-		"retention", aggregatorConfig.Retention,
-		"max_job_logs", aggregatorConfig.MaxJobLogs,
-	)
-	logAggregator := NewLogAggregator(ctx, consumer, resolver, aggregatorConfig)
-
-	// Create dynamic log manager
-	dynamicManager := NewDynamicLogManager(nc, consumer, logAggregator)
-
-	// Create the job-status webhook dispatcher. It is independent of the log
-	// forwarding path above: it reacts to the terminal status event itself, so a
-	// job's outcome is announced without waiting for the log consumer to drain.
+	// Load the webhook config first: its concurrency sizes the connection pool
+	// the log callback and the status webhook share.
 	var webhookCfg StatusWebhookConfig
 	if err := utils.LoadConfig(&webhookCfg); err != nil {
 		return fmt.Errorf("loading status webhook configuration: %w", err)
@@ -133,10 +117,37 @@ func run(cfg HadesLogManagerConfig) error {
 		"concurrency", webhookCfg.Concurrency,
 		"max_pending", webhookCfg.MaxPending,
 	)
+	transport := newCallbackTransport(webhookCfg.Concurrency)
 
+	// Create log aggregator
+	var aggregatorConfig AggregatorConfig
+	if err := utils.LoadConfig(&aggregatorConfig); err != nil {
+		return fmt.Errorf("loading aggregator configuration: %w", err)
+	}
+	slog.Info("Log aggregator configuration",
+		"batch_size", aggregatorConfig.BatchSize,
+		"retention", aggregatorConfig.Retention,
+		"max_job_logs", aggregatorConfig.MaxJobLogs,
+	)
+	logClient := &http.Client{Timeout: httpClientTimeout, Transport: transport}
+	logAggregator := NewLogAggregator(ctx, consumer, resolver, logClient, aggregatorConfig)
+
+	var watcherCfg LogWatcherConfig
+	if err := utils.LoadConfig(&watcherCfg); err != nil {
+		return fmt.Errorf("loading log watcher configuration: %w", err)
+	}
+	slog.Info("Log watcher configuration", "max_lifetime", watcherCfg.MaxLifetime)
+
+	// Create dynamic log manager
+	dynamicManager := NewDynamicLogManager(nc, consumer, logAggregator, watcherCfg)
+
+	// The job-status webhook dispatcher is independent of the log forwarding
+	// path above: it reacts to the terminal status event itself, so a job's
+	// outcome is announced without waiting for the log consumer to drain.
 	var dispatcher *StatusWebhookDispatcher
 	if webhookCfg.Enabled {
-		dispatcher = NewStatusWebhookDispatcher(js, resolver, nil, webhookCfg)
+		sender := newHTTPWebhookSender(webhookCfg.Timeout, transport)
+		dispatcher = NewStatusWebhookDispatcher(js, resolver, sender, webhookCfg)
 	}
 
 	// Set up graceful shutdown

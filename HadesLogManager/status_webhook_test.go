@@ -338,7 +338,7 @@ func TestHTTPWebhookSenderPostsJSONWithHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sender := newHTTPWebhookSender(5 * time.Second)
+	sender := newHTTPWebhookSender(5*time.Second, nil)
 	event := buildEvent("job-1", "Example Job", buildstatus.StatusFailed, "boom",
 		time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC),
 		time.Date(2026, 8, 21, 12, 0, 1, 0, time.UTC),
@@ -366,7 +366,7 @@ func TestHTTPWebhookSenderTreatsNon2xxAsFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sender := newHTTPWebhookSender(5 * time.Second)
+	sender := newHTTPWebhookSender(5*time.Second, nil)
 	err := sender.Send(context.Background(), srv.URL, JobStatusEvent{JobID: "job-1"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
@@ -385,7 +385,7 @@ func TestHTTPWebhookSenderDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sender := newHTTPWebhookSender(5 * time.Second)
+	sender := newHTTPWebhookSender(5*time.Second, nil)
 	err := sender.Send(context.Background(), srv.URL, JobStatusEvent{JobID: "job-1"})
 
 	// Following the redirect would downgrade the POST to a bodyless GET and
@@ -417,15 +417,23 @@ func TestLifecycleTrackerSweepsAndCaps(t *testing.T) {
 	assert.Empty(t, tracker.entries)
 	tracker.mu.Unlock()
 
-	// The cap evicts the least recently updated entry.
+	// Past twice the cap, the least recently updated entries are evicted back
+	// down to the cap.
 	tracker.maxSize = 2
-	tracker.observe("a", buildstatus.StatusQueued, now.Add(-3*time.Minute))
-	tracker.observe("b", buildstatus.StatusQueued, now.Add(-2*time.Minute))
-	tracker.observe("c", buildstatus.StatusQueued, now.Add(-time.Minute))
+	for i, id := range []string{"a", "b", "c", "d"} {
+		tracker.observe(id, buildstatus.StatusQueued, now.Add(time.Duration(i-5)*time.Minute))
+	}
 	tracker.mu.Lock()
-	_, aPresent := tracker.entries["a"]
+	assert.Len(t, tracker.entries, 4, "no eviction until the map exceeds twice its cap")
 	tracker.mu.Unlock()
-	assert.False(t, aPresent)
+	tracker.observe("e", buildstatus.StatusQueued, now)
+	tracker.mu.Lock()
+	assert.Len(t, tracker.entries, 2)
+	_, dPresent := tracker.entries["d"]
+	_, ePresent := tracker.entries["e"]
+	tracker.mu.Unlock()
+	assert.True(t, dPresent, "the most recently updated entries survive")
+	assert.True(t, ePresent)
 }
 
 func TestStatusWebhookConfigNormalizesInvalidValues(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hades-scheduler/hades/shared/buildstatus"
+	hadesnats "github.com/hades-scheduler/hades/shared/nats"
 	"github.com/hades-scheduler/hades/shared/payload"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -102,7 +103,7 @@ func startDispatcher(t *testing.T, ctx context.Context, cfg StatusWebhookConfig)
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 
-	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "HADES_JOBS"})
+	kv, err := js.CreateOrUpdateKeyValue(ctx, hadesnats.JobsKVConfig())
 	require.NoError(t, err)
 
 	dispatcher := NewStatusWebhookDispatcher(js, newKVCallbackResolver(kv), nil, cfg)

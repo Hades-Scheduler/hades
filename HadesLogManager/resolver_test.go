@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	hadesnats "github.com/hades-scheduler/hades/shared/nats"
 	"github.com/hades-scheduler/hades/shared/payload"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -53,7 +54,7 @@ func (s *ResolverSuite) SetupSuite() {
 	js, err := jetstream.New(s.nc)
 	require.NoError(s.T(), err)
 
-	s.kv, err = js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "HADES_JOBS"})
+	s.kv, err = js.CreateOrUpdateKeyValue(ctx, hadesnats.JobsKVConfig())
 	require.NoError(s.T(), err)
 
 	s.resolver = newKVCallbackResolver(s.kv)
@@ -78,27 +79,28 @@ func (s *ResolverSuite) putJob(job payload.QueuePayload) {
 }
 
 func (s *ResolverSuite) TestResolvesStoredCallbackURL() {
-	job := payload.QueuePayload{ID: uuid.New(), Name: "job", CallbackURL: "https://example.com/adapter/logs"}
+	job := payload.QueuePayload{ID: uuid.New(), Name: "job", CallbackURL: "https://example.com/adapter/logs", TimeoutSeconds: 90}
 	s.putJob(job)
 
-	url, err := s.resolver.CallbackURL(context.Background(), job.ID.String())
+	target, err := s.resolver.LogTarget(context.Background(), job.ID.String())
 	require.NoError(s.T(), err)
-	assert.Equal(s.T(), "https://example.com/adapter/logs", url)
+	assert.Equal(s.T(), "https://example.com/adapter/logs", target.CallbackURL)
+	assert.Equal(s.T(), int64(90), target.TimeoutSeconds)
 }
 
 func (s *ResolverSuite) TestJobWithoutCallbackURL() {
 	job := payload.QueuePayload{ID: uuid.New(), Name: "job"}
 	s.putJob(job)
 
-	url, err := s.resolver.CallbackURL(context.Background(), job.ID.String())
+	target, err := s.resolver.LogTarget(context.Background(), job.ID.String())
 	require.NoError(s.T(), err)
-	assert.Equal(s.T(), "", url)
+	assert.Equal(s.T(), "", target.CallbackURL)
 }
 
 func (s *ResolverSuite) TestMissingKeyIsNotAnError() {
-	url, err := s.resolver.CallbackURL(context.Background(), uuid.New().String())
+	target, err := s.resolver.LogTarget(context.Background(), uuid.New().String())
 	require.NoError(s.T(), err)
-	assert.Equal(s.T(), "", url)
+	assert.Equal(s.T(), logTarget{}, target)
 }
 
 func (s *ResolverSuite) TestResolvesStatusCallbackURL() {

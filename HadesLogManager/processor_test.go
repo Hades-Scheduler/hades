@@ -23,8 +23,8 @@ type fakeResolver struct {
 	err error
 }
 
-func (f fakeResolver) CallbackURL(ctx context.Context, jobID string) (string, error) {
-	return f.url, f.err
+func (f fakeResolver) LogTarget(ctx context.Context, jobID string) (logTarget, error) {
+	return logTarget{CallbackURL: f.url}, f.err
 }
 
 func testConfig() AggregatorConfig {
@@ -35,7 +35,7 @@ func newTestAggregator(t *testing.T, resolver jobCallbackResolver) buildlogs.Log
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return NewLogAggregator(ctx, nil, resolver, testConfig())
+	return NewLogAggregator(ctx, nil, resolver, nil, testConfig())
 }
 
 // newTestAggregatorMax builds an aggregator with a specific per-container entry
@@ -45,7 +45,7 @@ func newTestAggregatorMax(t *testing.T, maxJobLogs int) buildlogs.LogAggregator 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	cfg := AggregatorConfig{BatchSize: 100, Retention: time.Hour, MaxJobLogs: maxJobLogs}
-	return NewLogAggregator(ctx, nil, nil, cfg)
+	return NewLogAggregator(ctx, nil, nil, nil, cfg)
 }
 
 func logEntry(msg string) buildlogs.LogEntry {
@@ -243,3 +243,63 @@ func TestSendJobLogs_NilResolver_IsNoop(t *testing.T) {
 type assertErr string
 
 func (e assertErr) Error() string { return string(e) }
+
+// countingResolver counts lookups so tests can tell a cached target from a
+// fresh KV read.
+type countingResolver struct {
+	target logTarget
+	calls  atomic.Int32
+}
+
+func (c *countingResolver) LogTarget(context.Context, string) (logTarget, error) {
+	c.calls.Add(1)
+	return c.target, nil
+}
+
+// The callback URL is resolved when the watcher starts, so the forward after the
+// terminal status does not wait on a KV read.
+func TestSendJobLogs_UsesPrefetchedTarget(t *testing.T) {
+	var received atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	resolver := &countingResolver{target: logTarget{CallbackURL: srv.URL, TimeoutSeconds: 30}}
+	agg := newTestAggregator(t, resolver).(*NATSLogAggregator)
+
+	target, ok := agg.PrefetchJob(context.Background(), "job-1")
+	require.True(t, ok)
+	assert.Equal(t, int64(30), target.TimeoutSeconds)
+
+	require.NoError(t, agg.SendJobLogs(context.Background(), "job-1"))
+	assert.Equal(t, int32(1), resolver.calls.Load(), "SendJobLogs must reuse the prefetched target")
+	assert.Equal(t, int32(1), received.Load())
+
+	// Without a prefetch the target is still resolved at send time.
+	require.NoError(t, agg.SendJobLogs(context.Background(), "job-2"))
+	assert.Equal(t, int32(2), resolver.calls.Load())
+}
+
+// A job that never completes must not stay in memory forever.
+func TestCleanupStaleJobs(t *testing.T) {
+	agg := newTestAggregator(t, nil).(*NATSLogAggregator)
+	agg.UpdateJobStatus("stuck", "Running")
+	agg.AddLog(buildlogs.Log{JobID: "stuck", ContainerID: "c", Logs: []buildlogs.LogEntry{logEntry("x")}})
+	agg.UpdateJobStatus("done", "Succeeded")
+	agg.MarkJobCompleted("done")
+
+	agg.cleanupStaleJobs(time.Now().Add(staleJobTTL + time.Minute))
+
+	_, err := agg.GetJobStatus("stuck")
+	assert.Error(t, err, "a job stuck past the TTL is flushed")
+	assert.Empty(t, agg.GetJobLogs("stuck"))
+	_, err = agg.GetJobStatus("done")
+	assert.NoError(t, err, "completed jobs are left to the retention sweep")
+
+	agg.UpdateJobStatus("fresh", "Running")
+	agg.cleanupStaleJobs(time.Now())
+	_, err = agg.GetJobStatus("fresh")
+	assert.NoError(t, err)
+}

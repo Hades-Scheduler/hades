@@ -72,7 +72,7 @@ type StatusWebhookDispatcher struct {
 func NewStatusWebhookDispatcher(js jetstream.JetStream, resolver jobInfoResolver, sender webhookSender, cfg StatusWebhookConfig) *StatusWebhookDispatcher {
 	cfg = cfg.normalized()
 	if sender == nil {
-		sender = newHTTPWebhookSender(cfg.Timeout)
+		sender = newHTTPWebhookSender(cfg.Timeout, nil)
 	}
 	return &StatusWebhookDispatcher{
 		cfg:       cfg,
@@ -117,6 +117,15 @@ func (d *StatusWebhookDispatcher) Run(ctx context.Context) error {
 	)
 
 	cc, err := consumer.Consume(func(msg jetstream.Msg) {
+		// Non-terminal events only record a timestamp and ack, so handle them
+		// inline. Consume invokes this callback in stream order; handing a job's
+		// Running event to a goroutine would let it race the job's terminal
+		// delivery and the webhook could go out without started_at.
+		if !buildstatus.StatusFromSubject(msg.Subject()).IsTerminal() {
+			d.handle(ctx, msg)
+			return
+		}
+
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():

@@ -101,17 +101,21 @@ func (s *Server) handleListJobs(c *gin.Context) {
 
 	// The tracker already carries name and step count for jobs this replica
 	// enqueued, so a KV read is only needed for the rare job we learned about
-	// purely from a status event (no name). This keeps the list from doing a
-	// KV round-trip per row.
+	// purely from a status event (no name). The result, including a definitive
+	// miss, is written back so each such job costs one KV read in total rather
+	// than one per list request.
 	for i := range jobs {
-		if jobs[i].Name != "" {
+		if jobs[i].Name != "" || !s.tracker.needsIdentity(jobs[i].ID) {
 			continue
 		}
-		if job, ok := s.fetchPayload(c.Request.Context(), jobs[i].ID); ok {
-			jobs[i].Name = job.Name
-			if jobs[i].StepCount == 0 {
-				jobs[i].StepCount = len(job.Steps)
-			}
+		ident, ok := s.fetchIdentity(c.Request.Context(), jobs[i].ID)
+		if !ok {
+			continue
+		}
+		s.tracker.setIdentity(jobs[i].ID, ident.Name, len(ident.Steps))
+		jobs[i].Name = ident.Name
+		if jobs[i].StepCount == 0 {
+			jobs[i].StepCount = len(ident.Steps)
 		}
 	}
 
@@ -206,22 +210,52 @@ func (s *Server) handleJobLogs(c *gin.Context) {
 
 // fetchPayload reads and unmarshals a job's full payload from the KV bucket.
 func (s *Server) fetchPayload(ctx context.Context, id string) (payload.QueuePayload, bool) {
-	if s.kv == nil {
-		return payload.QueuePayload{}, false
-	}
-	entry, err := s.kv.Get(ctx, id)
-	if err != nil {
-		if !errors.Is(err, jetstream.ErrKeyNotFound) {
-			slog.Debug("KV get failed", "job_id", id, "error", err)
-		}
-		return payload.QueuePayload{}, false
-	}
 	var job payload.QueuePayload
-	if err := json.Unmarshal(entry.Value(), &job); err != nil {
-		slog.Warn("Failed to unmarshal job payload", "job_id", id, "error", err)
+	if found, _ := s.getStoredJob(ctx, id, &job); !found {
 		return payload.QueuePayload{}, false
 	}
 	return job, true
+}
+
+// jobIdentity is the part of a stored payload the job list shows. Steps are
+// left undecoded since only their count is needed.
+type jobIdentity struct {
+	Name  string            `json:"name"`
+	Steps []json.RawMessage `json:"steps"`
+}
+
+// fetchIdentity reads a job's name and steps from the KV bucket. ok is false
+// only for a transient failure worth retrying on a later request; a missing or
+// undecodable payload is reported as ok with a zero identity so it is cached.
+func (s *Server) fetchIdentity(ctx context.Context, id string) (ident jobIdentity, ok bool) {
+	found, transient := s.getStoredJob(ctx, id, &ident)
+	if !found {
+		return jobIdentity{}, !transient
+	}
+	return ident, true
+}
+
+// getStoredJob unmarshals the job's stored payload into out. found is false
+// when there is nothing usable; transient then says whether a later read might
+// succeed (KV unavailable or erroring) as opposed to a missing or undecodable
+// entry. out may be partially written when found is false.
+func (s *Server) getStoredJob(ctx context.Context, id string, out any) (found, transient bool) {
+	if s.kv == nil {
+		return false, true
+	}
+	entry, err := s.kv.Get(ctx, id)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return false, false
+		}
+		slog.Debug("KV get failed", "job_id", id, "error", err)
+		return false, true
+	}
+	if err := json.Unmarshal(entry.Value(), out); err != nil {
+		slog.Warn("Failed to unmarshal job payload", "job_id", id, "error", err)
+		return false, false
+	}
+	return true, false
 }
 
 func nonNil(m map[string]string) map[string]string {

@@ -41,11 +41,12 @@ type Durations struct {
 
 // metrics computes a fresh metrics snapshot.
 func (s *Server) metrics(ctx context.Context) *Metrics {
+	stats := s.tracker.stats(throughputWindow)
 	m := &Metrics{
-		StatusCounts:     s.tracker.counts(),
+		StatusCounts:     stats.counts,
 		QueueDepth:       s.queueDepth(ctx),
-		Durations:        summarizeDurations(s.tracker.finishedDurations()),
-		ThroughputPerMin: s.tracker.finishedSince(throughputWindow),
+		Durations:        summarizeDurations(stats.durations),
+		ThroughputPerMin: stats.finishedRecently,
 		StreamClients:    s.hub.clientCount(),
 		Timestamp:        time.Now().UTC(),
 	}
@@ -65,9 +66,10 @@ func (s *Server) queueDepth(ctx context.Context) QueueDepth {
 			slog.Debug("queue depth: consumer unavailable", "consumer", name, "error", err)
 			continue
 		}
-		info, err := cons.Info(ctx)
-		if err != nil {
-			slog.Debug("queue depth: consumer info failed", "consumer", name, "error", err)
+		// js.Consumer already fetched fresh info to bind the handle, so a
+		// second Info call would only repeat the round-trip.
+		info := cons.CachedInfo()
+		if info == nil {
 			continue
 		}
 		pending := int64(info.NumPending)

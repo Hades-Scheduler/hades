@@ -2,12 +2,12 @@ package dashboard
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/hades-scheduler/hades/shared/buildlogs"
 )
 
 // event types pushed over the SSE stream.
@@ -17,36 +17,39 @@ const (
 	eventLog     = "log"
 )
 
-// event is a single server-sent event payload.
+// event is a single server-sent event payload. Log holds a buildlogs.Log as the
+// compacted JSON stored in the stream; it is passed through rather than decoded
+// and re-encoded, which would produce the same bytes at a much higher cost.
 type event struct {
-	Type    string         `json:"type"`
-	Job     JobSummary     `json:"job,omitempty"`
-	Metrics *Metrics       `json:"metrics,omitempty"`
-	Log     *buildlogs.Log `json:"log,omitempty"`
+	Type    string          `json:"type"`
+	Job     JobSummary      `json:"job,omitempty"`
+	Metrics *Metrics        `json:"metrics,omitempty"`
+	Log     json.RawMessage `json:"log,omitempty"`
 }
 
 // subscriberBuffer bounds per-client backlog before a slow client is dropped.
 const subscriberBuffer = 32
 
-// hub fans events out to all connected SSE clients.
+// hub fans events out to all connected SSE clients. Clients receive the
+// already-encoded frame so an event is marshaled once, not once per client.
 type hub struct {
 	mu      sync.Mutex
-	clients map[chan event]struct{}
+	clients map[chan []byte]struct{}
 }
 
 func newHub() *hub {
-	return &hub{clients: make(map[chan event]struct{})}
+	return &hub{clients: make(map[chan []byte]struct{})}
 }
 
-func (h *hub) add() chan event {
-	ch := make(chan event, subscriberBuffer)
+func (h *hub) add() chan []byte {
+	ch := make(chan []byte, subscriberBuffer)
 	h.mu.Lock()
 	h.clients[ch] = struct{}{}
 	h.mu.Unlock()
 	return ch
 }
 
-func (h *hub) remove(ch chan event) {
+func (h *hub) remove(ch chan []byte) {
 	h.mu.Lock()
 	if _, ok := h.clients[ch]; ok {
 		delete(h.clients, ch)
@@ -58,11 +61,20 @@ func (h *hub) remove(ch chan event) {
 // broadcast delivers e to every client, dropping the event for any client whose
 // buffer is full (a slow client must not block the publisher).
 func (h *hub) broadcast(e event) {
+	if h.clientCount() == 0 {
+		return
+	}
+	// Encode outside the lock so connects and disconnects never wait on it.
+	payload, err := json.Marshal(e)
+	if err != nil {
+		slog.Warn("Failed to encode dashboard event", "type", e.Type, "error", err)
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for ch := range h.clients {
 		select {
-		case ch <- e:
+		case ch <- payload:
 		default:
 		}
 	}
@@ -115,11 +127,11 @@ func (s *Server) handleStream(c *gin.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case e, ok := <-ch:
+		case payload, ok := <-ch:
 			if !ok {
 				return
 			}
-			writeEvent(w, e)
+			writeFrame(w, payload)
 			w.Flush()
 		case <-heartbeat.C:
 			if _, err := w.WriteString(": ping\n\n"); err != nil {
@@ -136,6 +148,12 @@ func writeEvent(w gin.ResponseWriter, e event) {
 	if err != nil {
 		return
 	}
+	writeFrame(w, payload)
+}
+
+// writeFrame writes an encoded event as an SSE "data:" frame. payload must not
+// contain a newline, which json.Marshal output never does.
+func writeFrame(w gin.ResponseWriter, payload []byte) {
 	_, _ = w.WriteString("data: ")
 	_, _ = w.Write(payload)
 	_, _ = w.WriteString("\n\n")

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"time"
 
 	logs "github.com/hades-scheduler/hades/shared/buildlogs"
 	"github.com/hades-scheduler/hades/shared/buildstatus"
@@ -124,6 +125,9 @@ func (dlm *DynamicLogManager) StartListening(ctx context.Context) error {
 	<-ctx.Done()
 	slog.Info("Shutting down log manager subscriptions")
 	dlm.cleanupSubscriptions(subs)
+	// Drain is asynchronous: until the subscriptions are closed a status callback may
+	// still call sendWG.Add, which must not race with the Wait below.
+	waitSubscriptionsClosed(subs, subscriptionCloseTimeout)
 	// Wait for in-flight log-forwarding goroutines to finish (or cancel).
 	dlm.sendWG.Wait()
 
@@ -187,6 +191,25 @@ func (dlm *DynamicLogManager) handleJobFailed(ctx context.Context, jobID string)
 	slog.Info("Job failed", "job_id", jobID)
 	dlm.logAggregator.UpdateJobStatus(jobID, buildstatus.StatusFailed)
 	dlm.stopWatchingJobLogs(ctx, jobID)
+}
+
+// subscriptionCloseTimeout bounds how long shutdown waits for drained subscriptions
+// to deliver their remaining callbacks.
+const subscriptionCloseTimeout = 5 * time.Second
+
+// waitSubscriptionsClosed waits until all drained subscriptions have closed, or the
+// timeout runs out. StatusChanged fires immediately for a subscription that is
+// already closed, so calling this after Drain can't miss it.
+func waitSubscriptionsClosed(subs []*nats.Subscription, timeout time.Duration) {
+	deadline := time.After(timeout)
+	for _, sub := range subs {
+		select {
+		case <-sub.StatusChanged(nats.SubscriptionClosed):
+		case <-deadline:
+			slog.Warn("Timed out waiting for drained subscriptions to close")
+			return
+		}
+	}
 }
 
 // cleanupSubscriptions drains all subscriptions
@@ -284,29 +307,36 @@ func (dlm *DynamicLogManager) stopWatchingJobLogs(ctx context.Context, jobID str
 	}
 	dlm.mu.Unlock()
 
-	if exists {
-		slog.Info("Stopping log watch", "job_id", jobID)
-		// Request a graceful drain and wait for all batches to be aggregated before
-		// completing the job. Do NOT hard-cancel first: cancelling would abandon the
-		// still-in-flight JetStream batches that the fast core-NATS status raced ahead of.
-		close(watcher.drain)
-		watcher.wg.Wait() // Wait outside the lock
+	if !exists {
+		return
+	}
+
+	slog.Info("Stopping log watch", "job_id", jobID)
+	// Request a graceful drain. Do NOT hard-cancel first: cancelling would abandon the
+	// still-in-flight JetStream batches that the fast core-NATS status raced ahead of.
+	close(watcher.drain)
+
+	// Don't wait for the drain here: all callbacks of a subscription share one
+	// goroutine, so a slow drain would delay every other job's terminal status.
+	// sendWG.Add happens before the goroutine starts so shutdown's Wait sees it.
+	dlm.sendWG.Add(1)
+	go func() {
+		defer dlm.sendWG.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Panic while sending job logs", "job_id", jobID, "panic", r)
+			}
+		}()
+
+		watcher.wg.Wait()
 		// The goroutine has finished draining; releasing the job context now just frees
 		// its resources (and satisfies the lostcancel vet check).
 		watcher.cancel()
 
+		// Only forward logs once every batch is aggregated and the job is completed.
 		dlm.logAggregator.MarkJobCompleted(jobID)
-		dlm.sendWG.Add(1)
-		go func() {
-			defer dlm.sendWG.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Error("Panic while sending job logs", "job_id", jobID, "panic", r)
-				}
-			}()
-			if err := dlm.logAggregator.SendJobLogs(ctx, jobID); err != nil {
-				slog.Error("Failed to send job logs", "job_id", jobID, "error", err)
-			}
-		}()
-	}
+		if err := dlm.logAggregator.SendJobLogs(ctx, jobID); err != nil {
+			slog.Error("Failed to send job logs", "job_id", jobID, "error", err)
+		}
+	}()
 }

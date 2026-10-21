@@ -1,6 +1,7 @@
 package buildlogs
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -83,4 +84,34 @@ func TestContainerLogBatcher_EmptySlotPreservesOrder(t *testing.T) {
 	assert.Empty(t, out[0].Logs)
 	assert.Equal(t, "step-2", out[1].ContainerID)
 	require.Len(t, out[1].Logs, 1)
+}
+
+func TestWaitIdle_WakesOnDrain(t *testing.T) {
+	stop := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		close(stop)
+	}()
+
+	start := time.Now()
+	waitIdle(context.Background(), stop, 5*time.Second)
+	assert.Less(t, time.Since(start), time.Second, "drain must interrupt the idle backoff")
+}
+
+func TestWaitIdle_WakesOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	waitIdle(ctx, nil, 5*time.Second)
+	assert.Less(t, time.Since(start), time.Second, "cancel must interrupt the idle backoff")
+}
+
+func TestWaitIdle_SleepsFullDurationWithoutSignal(t *testing.T) {
+	start := time.Now()
+	waitIdle(context.Background(), nil, 50*time.Millisecond)
+	assert.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond)
 }

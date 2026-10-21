@@ -120,28 +120,49 @@ func processStream(buf *bytes.Buffer, streamType string, entries *[]logs.LogEntr
 // batches, rather than buffering the whole stream to EOF first.
 //
 // It blocks until r reaches EOF (the follow stream closes when the container
-// stops) or a read error occurs, returning any scanner error.
+// stops) or a read error occurs, returning any read error.
+//
+// Lines longer than maxStreamLineSize are truncated rather than aborting the
+// scan. A bufio.Scanner stops reading at its first oversized token, and with
+// the unbuffered pipes the Docker executor feeds in here that wedges StdCopy,
+// stalls the step for the whole drain timeout and drops the log tail.
 func ScanStream(r io.Reader, streamType string, emit func(logs.LogEntry)) error {
 	if r == nil {
 		return nil
 	}
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 64KB buffer, 1MB max
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	br := bufio.NewReaderSize(r, 64*1024)
+	var line []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		// A line that fits the reader's buffer is used straight from it; only
+		// longer ones are staged in line. chunk is bufio's own memory, so it
+		// must never become line's backing array.
+		full := chunk
+		if err == bufio.ErrBufferFull || len(line) > 0 {
+			if room := maxStreamLineSize - len(line); room > 0 {
+				line = append(line, chunk[:min(len(chunk), room)]...)
+			}
+			if err == bufio.ErrBufferFull {
+				continue
+			}
+			full = line
 		}
-		emit(parseLogLine(line, streamType))
+		if text := strings.TrimSpace(string(full)); text != "" {
+			emit(parseLogLine(text, streamType))
+		}
+		line = line[:0]
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("scanning %s stream: %w", streamType, err)
+		}
 	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scanning %s stream: %w", streamType, err)
-	}
-	return nil
 }
+
+// maxStreamLineSize caps one streamed log line; the rest of the line is dropped.
+const maxStreamLineSize = 1024 * 1024
 
 // parseLogLine parses a single log line into a structured LogEntry.
 // It handles both structured application logs and simple container logs.

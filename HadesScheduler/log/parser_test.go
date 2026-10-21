@@ -51,3 +51,18 @@ func TestScanStream_NilReader(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, called)
 }
+
+func TestScanStream_TruncatesOversizedLineAndKeepsReading(t *testing.T) {
+	long := "2023-01-01T00:00:00Z " + strings.Repeat("x", 3*maxStreamLineSize)
+	input := long + "\n2023-01-01T00:00:01Z after\nno newline at EOF"
+
+	var got []logs.LogEntry
+	err := ScanStream(strings.NewReader(input), StreamStdout, func(e logs.LogEntry) {
+		got = append(got, e)
+	})
+	require.NoError(t, err)
+	require.Len(t, got, 3, "an oversized line must not stop the scan")
+	assert.Len(t, got[0].Message, maxStreamLineSize-len("2023-01-01T00:00:00Z "))
+	assert.Equal(t, "after", got[1].Message)
+	assert.Equal(t, "no newline at EOF", got[2].Message)
+}

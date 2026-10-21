@@ -35,6 +35,29 @@ func (d Job) execute(ctx context.Context) error {
 	// executor, where such a step never fails the job at all.
 	stepErr := error(nil)
 
+	// Pull all images in parallel up front. Pulling per step would make each
+	// later step pay for its pull only after the previous step finished.
+	puller := imagePuller{
+		policy: d.imagePullPolicy,
+		present: func(ctx context.Context, image string) bool {
+			return imagePresentLocally(ctx, d.cli, image)
+		},
+		pull: func(ctx context.Context, image string) error {
+			return pullImages(ctx, d.cli, image)
+		},
+		record: d.timer.RecordImagePull,
+	}
+	pullCtx, cancelPulls := context.WithCancel(ctx)
+	images := puller.prefetch(pullCtx, distinctImages(d.Steps))
+	// If the job stops early, cancel pulls for steps that won't run. Still wait
+	// for them so nothing records timing after the job has returned.
+	defer func() {
+		cancelPulls()
+		for _, img := range images {
+			_ = img.wait()
+		}
+	}()
+
 	for _, step := range d.Steps {
 		d.logger.Info("Executing step", slog.Any("step", step))
 
@@ -53,6 +76,7 @@ func (d Job) execute(ctx context.Context) error {
 			Step:      step,
 			publisher: d.publisher,
 			timer:     d.timer,
+			image:     images[step.Image],
 		}
 
 		stepCtx := context.WithValue(ctx, jobIDContextKey("job_id"), d.ID.String())

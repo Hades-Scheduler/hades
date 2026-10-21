@@ -33,7 +33,7 @@ The default configuration uses `docker` as the executor, so no further changes a
 | Variable | Default | Description |
 |---|---|---|
 | `HADES_EXECUTOR` | `docker` | Execution backend. Use `docker` for local mode. |
-| `CONCURRENCY` | `1` | Number of jobs processed concurrently. |
+| `CONCURRENCY` | `1` | Number of jobs processed concurrently. The bundled `compose.yml` sets this to `4` unless overridden. |
 | `API_PORT` | `8080` | Port the Hades API listens on. |
 | `AUTH_KEY` | *(empty)* | HTTP Basic Auth key for `/build` (empty = no auth). |
 

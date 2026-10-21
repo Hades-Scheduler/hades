@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/hades-scheduler/hades/shared/payload"
@@ -117,31 +118,37 @@ func TestNeedsPullSkipsKnownResults(t *testing.T) {
 }
 
 func TestPullCoalescerSharesInflightPull(t *testing.T) {
-	c := newPullCoalescer(time.Minute)
-	release := make(chan struct{})
-	var calls atomic.Int32
-	pull := func(context.Context) error {
-		calls.Add(1)
-		<-release
-		return nil
-	}
+	// synctest.Wait lets the test know the second job is really parked on the
+	// shared pull before it is released. Without it the second goroutine could
+	// arrive after the first pull finished and start a pull of its own.
+	synctest.Test(t, func(t *testing.T) {
+		c := newPullCoalescer(time.Minute)
+		release := make(chan struct{})
+		var calls atomic.Int32
+		pull := func(context.Context) error {
+			calls.Add(1)
+			<-release
+			return nil
+		}
 
-	// The first job is cancelled while the pull runs; the second must still
-	// get the shared result instead of the first job's cancellation.
-	ctx1, cancel1 := context.WithCancel(context.Background())
-	errs := make(chan error, 2)
-	go func() { errs <- c.pull(ctx1, "img", pull) }()
-	require.Eventually(t, func() bool { return calls.Load() == 1 }, time.Second, time.Millisecond)
-	go func() { errs <- c.pull(context.Background(), "img", pull) }()
-	cancel1()
-	require.ErrorIs(t, <-errs, context.Canceled)
-	require.False(t, c.recentlyPulled("img"))
-	close(release)
-	require.NoError(t, <-errs)
+		// The first job is cancelled while the pull runs; the second must still
+		// get the shared result instead of the first job's cancellation.
+		ctx1, cancel1 := context.WithCancel(context.Background())
+		errs := make(chan error, 2)
+		go func() { errs <- c.pull(ctx1, "img", pull) }()
+		synctest.Wait()
+		go func() { errs <- c.pull(context.Background(), "img", pull) }()
+		synctest.Wait()
+		cancel1()
+		require.ErrorIs(t, <-errs, context.Canceled)
+		require.False(t, c.recentlyPulled("img"))
+		close(release)
+		require.NoError(t, <-errs)
 
-	require.Equal(t, int32(1), calls.Load())
-	require.True(t, c.recentlyPulled("img"))
-	require.False(t, newPullCoalescer(0).recentlyPulled("img"))
+		require.Equal(t, int32(1), calls.Load())
+		require.True(t, c.recentlyPulled("img"))
+		require.False(t, newPullCoalescer(0).recentlyPulled("img"))
+	})
 }
 
 func TestPullCoalescerDoesNotCacheFailures(t *testing.T) {

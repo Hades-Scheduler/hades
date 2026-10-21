@@ -109,6 +109,10 @@ type BuildJobReconciler struct {
 	// to DefaultFinalizerImage.
 	FinalizerImage string
 
+	// ImagePullPolicy is applied to every step container. Empty leaves it unset,
+	// which keeps Kubernetes' default (Always for :latest or untagged images).
+	ImagePullPolicy corev1.PullPolicy
+
 	// LogStreams tracks live per-container log-follow goroutines. It is created
 	// lazily by logStreams() if left nil.
 	LogStreams     *logStreamRegistry
@@ -148,6 +152,25 @@ func (r *BuildJobReconciler) finalizerImage() string {
 		return DefaultFinalizerImage
 	}
 	return r.FinalizerImage
+}
+
+// ParseImagePullPolicy maps K8S_IMAGE_PULL_POLICY to the Kubernetes constant. It
+// uses the same always / if-not-present / never values as the Docker executor's
+// DOCKER_IMAGE_PULL_POLICY. Empty means "leave unset". Unknown values fail instead
+// of falling back, so a typo doesn't quietly do nothing.
+func ParseImagePullPolicy(s string) (corev1.PullPolicy, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return "", nil
+	case "always":
+		return corev1.PullAlways, nil
+	case "if-not-present":
+		return corev1.PullIfNotPresent, nil
+	case "never":
+		return corev1.PullNever, nil
+	default:
+		return "", fmt.Errorf("invalid image pull policy %q: expected one of \"always\", \"if-not-present\", \"never\" (or empty)", s)
+	}
 }
 
 // positiveOrDefault returns d when it is positive, otherwise fallback.
@@ -371,7 +394,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	shouldSuspend := active >= r.MaxParallelism
 
 	// 3.1 Create Kubernetes Job (initContainers = bj.Spec.Steps)
-	k8sJob := buildK8sJob(&bj, jobName, r.DeleteOnComplete, shouldSuspend, r.finalizerImage())
+	k8sJob := buildK8sJob(&bj, jobName, r.DeleteOnComplete, shouldSuspend, r.finalizerImage(), r.ImagePullPolicy)
 
 	// 3.2 Set OwnerReference
 	if err := controllerutil.SetControllerReference(&bj, k8sJob, r.Scheme); err != nil {
@@ -536,7 +559,7 @@ func (r *BuildJobReconciler) setStatusPending(ctx context.Context, nn types.Name
 }
 
 // buildK8sJob creates a one-time Job with InitContainers that execute each Step in order
-func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, suspend bool, finalizerImage string) *batchv1.Job {
+func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, suspend bool, finalizerImage string, pullPolicy corev1.PullPolicy) *batchv1.Job {
 	sharedVolName := "shared"
 	sharedMount := corev1.VolumeMount{Name: sharedVolName, MountPath: "/shared"}
 
@@ -563,6 +586,9 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		c := corev1.Container{
 			Name:  fmt.Sprintf(BuildStepPrefix, s.ID),
 			Image: s.Image,
+			// Empty leaves the field unset so Kubernetes applies its own default
+			// (Always for :latest or untagged images, IfNotPresent otherwise).
+			ImagePullPolicy: pullPolicy,
 			// Match the Docker executor, which sets the working directory to the
 			// shared volume for every step (HadesScheduler/docker/step.go).
 			// Without this the container starts in whatever WORKDIR its image

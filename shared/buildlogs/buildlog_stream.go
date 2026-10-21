@@ -309,11 +309,13 @@ func (hlc *HadesLogConsumer) processBatchedLogs(ctx context.Context, consumer je
 	// flushing when the batch grows large. It returns true if any message was
 	// received. It is shared by the steady-state loop and the drain loop so both
 	// consume from the same durable position, guaranteeing no message is read or
-	// aggregated twice.
-	fetchOnce := func() bool {
+	// aggregated twice. After an empty fetch it backs off until stop closes. The
+	// drain loop passes nil because drain is already closed there and the backoff
+	// would turn into a busy loop.
+	fetchOnce := func(stop <-chan struct{}) bool {
 		batch, err := consumer.FetchNoWait(defaultFetchSize)
 		if err != nil {
-			time.Sleep(defaultFetchWaitTime)
+			waitIdle(ctx, stop, defaultFetchWaitTime)
 			return false
 		}
 
@@ -345,7 +347,7 @@ func (hlc *HadesLogConsumer) processBatchedLogs(ctx context.Context, consumer je
 		}
 
 		if !hasMessages {
-			time.Sleep(defaultFetchWaitTime)
+			waitIdle(ctx, stop, defaultFetchWaitTime)
 		}
 		return hasMessages
 	}
@@ -372,7 +374,7 @@ func (hlc *HadesLogConsumer) processBatchedLogs(ctx context.Context, consumer je
 		case <-batchTimer.C:
 			flushBatch()
 		default:
-			fetchOnce()
+			fetchOnce(drain)
 		}
 	}
 }
@@ -385,7 +387,7 @@ func (hlc *HadesLogConsumer) processBatchedLogs(ctx context.Context, consumer je
 // bounded by defaultDrainTimeout so it can never hang; on timeout it flushes whatever
 // it has and returns. It reuses the same consumer position as the steady-state loop,
 // so no message is re-read or duplicated.
-func (hlc *HadesLogConsumer) drainToCaughtUp(ctx context.Context, consumer jetstream.Consumer, jobID string, fetchOnce func() bool, flushBatch func()) error {
+func (hlc *HadesLogConsumer) drainToCaughtUp(ctx context.Context, consumer jetstream.Consumer, jobID string, fetchOnce func(stop <-chan struct{}) bool, flushBatch func()) error {
 	slog.Info("Draining remaining job logs before stopping", "job_id", jobID)
 
 	drainCtx, cancel := context.WithTimeout(ctx, defaultDrainTimeout)
@@ -409,6 +411,16 @@ func (hlc *HadesLogConsumer) drainToCaughtUp(ctx context.Context, consumer jetst
 			return nil
 		}
 
-		fetchOnce()
+		fetchOnce(nil)
+	}
+}
+
+// waitIdle backs off for d between empty fetches, but wakes early when stop is closed
+// or ctx is cancelled so a stop request is not delayed by the remaining backoff.
+func waitIdle(ctx context.Context, stop <-chan struct{}, d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-stop:
+	case <-ctx.Done():
 	}
 }

@@ -138,9 +138,6 @@ func (d *Scheduler) ScheduleJob(ctx context.Context, job payload.QueuePayload) e
 	// shared-<jobID> volume would leak.
 	defer func() {
 		teardownStart := time.Now()
-		// Give any auto-removing containers a moment to detach from the volume.
-		time.Sleep(500 * time.Millisecond)
-
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := deleteSharedVolume(cleanupCtx, d.cli, volumeName); err != nil {

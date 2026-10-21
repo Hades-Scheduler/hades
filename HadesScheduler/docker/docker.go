@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
+	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/hades-scheduler/hades/hadesScheduler/log"
 	"github.com/hades-scheduler/hades/shared/buildlogs"
+	"github.com/hades-scheduler/hades/shared/payload"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/client"
 	"github.com/moby/moby/client/pkg/jsonmessage"
@@ -137,9 +140,16 @@ func createSharedVolume(ctx context.Context, cli *client.Client, name string) er
 	return nil
 }
 
+// volumeInUseRetryWindow caps how long volume removal keeps retrying while the
+// daemon still reports the volume as attached. Containers are removed before
+// teardown, but an auto-removing one can take a moment to fully detach.
+const volumeInUseRetryWindow = 5 * time.Second
+
 func deleteSharedVolume(ctx context.Context, cli *client.Client, name string) error {
-	// Delete the volume
-	_, err := cli.VolumeRemove(ctx, name, client.VolumeRemoveOptions{Force: true})
+	err := removeVolumeWithRetry(ctx, func(ctx context.Context) error {
+		_, err := cli.VolumeRemove(ctx, name, client.VolumeRemoveOptions{Force: true})
+		return err
+	}, 25*time.Millisecond, volumeInUseRetryWindow)
 	if err != nil {
 		slog.Error("Failed to delete shared volume", slog.Any("error", err))
 		return err
@@ -148,4 +158,110 @@ func deleteSharedVolume(ctx context.Context, cli *client.Client, name string) er
 	slog.Debug("Volume deleted", slog.Any("volume", name))
 
 	return nil
+}
+
+// isVolumeInUse reports whether err is the daemon refusing to remove a volume
+// that a container still references. Older daemons return a plain 500 with only
+// the message, so the text is checked as well as the conflict status.
+func isVolumeInUse(err error) bool {
+	return cerrdefs.IsConflict(err) || strings.Contains(err.Error(), "volume is in use")
+}
+
+// removeVolumeWithRetry retries remove with a doubling backoff while the volume is
+// still in use, until the window runs out. Any other error is returned right away.
+// The first attempt isn't delayed, so the usual case costs a single call.
+func removeVolumeWithRetry(ctx context.Context, remove func(context.Context) error, initialDelay, window time.Duration) error {
+	deadline := time.Now().Add(window)
+	delay := initialDelay
+	for {
+		err := remove(ctx)
+		if err == nil || !isVolumeInUse(err) {
+			return err
+		}
+		if time.Now().Add(delay).After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+}
+
+// imageRef is one distinct image of a job plus the first step that uses it. The
+// pull timing is recorded against that step.
+type imageRef struct {
+	image string
+	step  int
+}
+
+// distinctImages returns each image of steps once, in first-use order.
+func distinctImages(steps []payload.Step) []imageRef {
+	seen := make(map[string]struct{}, len(steps))
+	var refs []imageRef
+	for _, s := range steps {
+		if _, ok := seen[s.Image]; ok {
+			continue
+		}
+		seen[s.Image] = struct{}{}
+		refs = append(refs, imageRef{image: s.Image, step: s.ID})
+	}
+	return refs
+}
+
+// imagePuller wraps the daemon calls of a prefetch so tests can run it without a
+// daemon.
+type imagePuller struct {
+	policy  PullPolicy
+	present func(ctx context.Context, image string) bool
+	pull    func(ctx context.Context, image string) error
+	record  func(step int, start, end time.Time, cached bool)
+}
+
+// pendingImage is the result of one image's prefetch. err is set once done closes.
+type pendingImage struct {
+	done chan struct{}
+	err  error
+}
+
+// wait blocks until the image is resolved and returns the pull outcome.
+func (pi *pendingImage) wait() error {
+	<-pi.done
+	return pi.err
+}
+
+// prefetch starts resolving all refs in parallel and returns one handle per image,
+// so a step only waits for its own image and not the slowest one. Errors go through
+// the handle instead of failing the job, so they still surface at the step that
+// needs the image and ContinueOnError keeps working.
+func (p imagePuller) prefetch(ctx context.Context, refs []imageRef) map[string]*pendingImage {
+	out := make(map[string]*pendingImage, len(refs))
+	for _, ref := range refs {
+		pi := &pendingImage{done: make(chan struct{})}
+		out[ref.image] = pi
+		go func() {
+			defer close(pi.done)
+			// Check presence before starting the clock so the local lookup
+			// isn't counted as pull time.
+			cached := p.present(ctx, ref.image)
+			start := time.Now()
+			switch {
+			case p.policy.shouldPull(cached):
+				pi.err = p.pull(ctx, ref.image)
+			case !cached:
+				// Only reachable under PullNever. Fail here rather than letting
+				// ContainerCreate report a confusing "No such image" later.
+				pi.err = fmt.Errorf(
+					"image %s is not present locally and the pull policy is %q",
+					ref.image, p.policy)
+			}
+			// Record even when the pull is skipped. A missing phase breaks the
+			// per-job overhead rollup, and a near-zero image_pull with
+			// cached=true shows the policy is working.
+			p.record(ref.step, start, time.Now(), cached)
+		}()
+	}
+	return out
 }

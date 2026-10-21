@@ -38,6 +38,8 @@ services:
     environment:
       - NATS_URL=nats://nats:4222
       - HADES_EXECUTOR=docker
+      # Without this the scheduler runs jobs strictly one at a time.
+      - CONCURRENCY=${CONCURRENCY:-4}
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
 
   hadesLogManager:

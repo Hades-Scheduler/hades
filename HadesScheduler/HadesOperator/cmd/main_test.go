@@ -107,12 +107,26 @@ func loadOperatorConfig(t *testing.T) OperatorConfig {
 // cannot leak into the assertions, restoring them when the test ends.
 func clearOperatorEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"DELETE_ON_COMPLETE", "MAX_PARALLELISM", "REQUEUE_DELAY", "LOG_DRAIN_TIMEOUT"} {
+	for _, k := range []string{"DELETE_ON_COMPLETE", "MAX_PARALLELISM", "REQUEUE_DELAY", "LOG_DRAIN_TIMEOUT", "K8S_IMAGE_PULL_POLICY"} {
 		if old, ok := os.LookupEnv(k); ok {
 			t.Cleanup(func() { _ = os.Setenv(k, old) })
 		}
 		if err := os.Unsetenv(k); err != nil {
 			t.Fatalf("unset %s: %v", k, err)
 		}
+	}
+}
+
+func TestOperatorConfigImagePullPolicy(t *testing.T) {
+	clearOperatorEnv(t)
+	if cfg := loadOperatorConfig(t); cfg.ImagePullPolicy != "" {
+		t.Errorf("default ImagePullPolicy = %q, want empty (unset)", cfg.ImagePullPolicy)
+	}
+
+	t.Setenv("K8S_IMAGE_PULL_POLICY", "If-Not-Present")
+	cfg := loadOperatorConfig(t)
+	got, err := controller.ParseImagePullPolicy(cfg.ImagePullPolicy)
+	if err != nil || got != "IfNotPresent" {
+		t.Errorf("ParseImagePullPolicy(%q) = %q, %v", cfg.ImagePullPolicy, got, err)
 	}
 }

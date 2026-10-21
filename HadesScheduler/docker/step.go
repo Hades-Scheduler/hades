@@ -32,30 +32,12 @@ type Step struct {
 	payload.Step
 	publisher buildlogs.LogPublisher
 	timer     *timing.JobTimer
+	// image is pulled by the job before the steps run (see Job.execute).
+	image *pendingImage
 }
 
 func (s Step) execute(ctx context.Context) error {
-	// Record whether the image is already present locally (a cache hit) so cold
-	// and warm pulls are distinguishable. The probe is a local daemon call taken
-	// before the pull clock starts, so it is not counted as image-pull time.
-	cached := imagePresentLocally(ctx, s.cli, s.Image)
-	pullStart := time.Now()
-	// The phase is recorded either way, including when the pull is skipped: a
-	// missing phase would break the per-job overhead rollup, and a near-zero
-	// image_pull with cached=true is exactly the evidence that the policy took
-	// effect.
-	var err error
-	if s.imagePullPolicy.shouldPull(cached) {
-		err = pullImages(ctx, s.cli, s.Image)
-	} else if !cached {
-		// Only reachable under PullNever. Fail here rather than letting
-		// ContainerCreate report a confusing "No such image" further down.
-		err = fmt.Errorf(
-			"image %s is not present locally and the pull policy is %q",
-			s.Image, s.imagePullPolicy)
-	}
-	s.timer.RecordImagePull(s.ID, pullStart, time.Now(), cached)
-	if err != nil {
+	if err := s.image.wait(); err != nil {
 		s.logger.Error("Failed to pull image", slog.Any("error", err))
 		return err
 	}

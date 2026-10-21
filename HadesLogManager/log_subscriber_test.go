@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/hades-scheduler/hades/shared/buildlogs"
+	"github.com/hades-scheduler/hades/shared/buildstatus"
 	hadesnats "github.com/hades-scheduler/hades/shared/nats"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
@@ -104,10 +107,11 @@ func TestStopWatchingDrainsAllContainerLogsBeforeCompletion(t *testing.T) {
 		require.NoError(t, err, "publish log for %s", cid)
 	}
 
-	// Drive the running -> succeeded path. handleJobSucceeded blocks until the graceful
-	// drain has aggregated every in-flight batch, so the assertions below are deterministic.
+	// Drive the running -> succeeded path. Completion runs in the background, so wait
+	// on sendWG to keep the assertions below deterministic.
 	dlm.handleJobRunning(ctx, jobID)
 	dlm.handleJobSucceeded(ctx, jobID)
+	dlm.sendWG.Wait()
 
 	logs := aggregator.GetJobLogs(jobID)
 
@@ -146,4 +150,102 @@ func TestStopWatchingWithoutWatcherIsNoop(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stopWatchingJobLogs blocked for an unknown job")
 	}
+}
+
+// recordingAggregator records the order of completion calls and otherwise does nothing.
+type recordingAggregator struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *recordingAggregator) record(e string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, e)
+}
+
+func (r *recordingAggregator) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+func (r *recordingAggregator) AddLog(buildlogs.Log)              {}
+func (r *recordingAggregator) FlushJob(string) error             { return nil }
+func (r *recordingAggregator) GetJobLogs(string) []buildlogs.Log { return nil }
+func (r *recordingAggregator) GetAllJobs() []string              { return nil }
+func (r *recordingAggregator) UpdateJobStatus(id string, s buildstatus.JobStatus) {
+	r.record("status:" + id + ":" + string(s))
+}
+func (r *recordingAggregator) GetJobStatus(string) (buildstatus.JobStatus, error) {
+	return "", nil
+}
+func (r *recordingAggregator) MarkJobCompleted(id string) { r.record("completed:" + id) }
+func (r *recordingAggregator) SendJobLogs(_ context.Context, id string) error {
+	r.record("sent:" + id)
+	return nil
+}
+
+// TestSlowDrainDoesNotBlockOtherJobs holds job A's drain open and checks that job B
+// still gets completed and forwarded. A's logs must only go out after its drain ends.
+func TestSlowDrainDoesNotBlockOtherJobs(t *testing.T) {
+	agg := &recordingAggregator{}
+	dlm := &DynamicLogManager{
+		logAggregator: agg,
+		watchers:      make(map[string]watcherState),
+	}
+
+	newWatcher := func() (watcherState, *sync.WaitGroup) {
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		return watcherState{cancel: func() {}, drain: make(chan struct{}), wg: wg}, wg
+	}
+	watcherA, wgA := newWatcher()
+	watcherB, wgB := newWatcher()
+	dlm.watchers["A"] = watcherA
+	dlm.watchers["B"] = watcherB
+
+	ctx := context.Background()
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		dlm.handleJobSucceeded(ctx, "A")
+		dlm.handleJobSucceeded(ctx, "B")
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handlers blocked on a slow drain")
+	}
+
+	// B's drain finishes while A's is still stuck.
+	wgB.Done()
+	require.Eventually(t, func() bool {
+		return slices.Contains(agg.snapshot(), "sent:B")
+	}, 2*time.Second, 5*time.Millisecond, "job B must be forwarded while A is still draining")
+	require.NotContains(t, agg.snapshot(), "completed:A")
+	require.NotContains(t, agg.snapshot(), "sent:A")
+
+	// A completes: completed must precede sent.
+	wgA.Done()
+	dlm.sendWG.Wait()
+	events := agg.snapshot()
+	require.Less(t, slices.Index(events, "completed:A"), slices.Index(events, "sent:A"))
+	require.Contains(t, events, "status:A:"+string(buildstatus.StatusSucceeded))
+
+	// A duplicate terminal event is a no-op.
+	dlm.handleJobSucceeded(ctx, "A")
+	dlm.sendWG.Wait()
+	require.Equal(t, 1, count(agg.snapshot(), "sent:A"))
+}
+
+func count(s []string, v string) int {
+	n := 0
+	for _, e := range s {
+		if e == v {
+			n++
+		}
+	}
+	return n
 }

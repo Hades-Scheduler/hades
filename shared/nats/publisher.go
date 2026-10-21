@@ -38,7 +38,7 @@ func NewHadesPublisher(nc *nats.Conn) (*HadesNATSPublisher, error) {
 
 	s, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:       "HADES_JOBS",
-		Subjects:   []string{fmt.Sprintf("%s.*", natsSubjectBase)},
+		Subjects:   []string{allJobsSubject},
 		Storage:    jetstream.FileStorage,
 		Retention:  jetstream.WorkQueuePolicy,
 		Duplicates: 1 * time.Minute, // Disallow duplicates for 1 minute

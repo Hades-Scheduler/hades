@@ -152,6 +152,13 @@ hadesOperator:
   # a registry round trip to every job for an image the node already has.
   # Empty falls back to the operator's built-in default.
   finalizerImage: "busybox:1.37.0"
+  # -- imagePullPolicy for build step containers: `always`, `if-not-present` or
+  # `never` (case-insensitive). If empty, Kubernetes pulls `:latest` and untagged
+  # images on every step. `if-not-present` skips the pull when the node already
+  # has the image (so a moved tag isn't picked up), `never` fails steps whose
+  # image is missing. The finalizer container is not affected. Invalid values
+  # fail operator startup.
+  imagePullPolicy: ""
 
 hadesLogManager:
   image:

@@ -57,7 +57,7 @@ func TestBuildK8sJob_ContinueOnError(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
 
 	// Normal step: run the script directly so a failure fails the container.
 	normal := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, 1))
@@ -107,7 +107,7 @@ func TestBuildK8sJob_JobMetadataInjected(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
 	c := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, 1))
 
 	wants := map[string]string{
@@ -147,7 +147,7 @@ func TestBuildK8sJob_NoDuplicateStepScriptEnv(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
 	c := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, 1))
 
 	if n := envCount(c, "HADES_STEP_SCRIPT"); n != 1 {
@@ -173,7 +173,7 @@ func TestBuildK8sJob_ActiveDeadlineSeconds(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
 	if job.Spec.ActiveDeadlineSeconds == nil {
 		t.Fatalf("ActiveDeadlineSeconds not set, want %d", timeout)
 	}
@@ -193,7 +193,7 @@ func TestBuildK8sJob_NoTimeoutLeavesDeadlineUnset(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
 	if job.Spec.ActiveDeadlineSeconds != nil {
 		t.Errorf("ActiveDeadlineSeconds = %v, want nil", *job.Spec.ActiveDeadlineSeconds)
 	}
@@ -226,7 +226,7 @@ func TestBuildK8sJob_StepsRunInSharedVolume(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
 
 	for _, id := range []int{1, 2} {
 		c := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, id))
@@ -268,7 +268,7 @@ func TestBuildK8sJob_FinalizerImageIsPinnedAndNotAlwaysPulled(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
 
 	var found bool
 	for _, c := range job.Spec.Template.Spec.Containers {
@@ -331,7 +331,7 @@ func TestBuildK8sJob_HonoursFinalizerImageOverride(t *testing.T) {
 	}
 
 	const custom = "registry.internal/busybox:1.36"
-	job := buildK8sJob(bj, "job-1", true, false, custom)
+	job := buildK8sJob(bj, "job-1", true, false, custom, "")
 
 	for _, c := range job.Spec.Template.Spec.Containers {
 		if c.Name == FinalizerContainerName {

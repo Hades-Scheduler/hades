@@ -141,6 +141,34 @@ func ackProgressInterval(ackWait time.Duration) time.Duration {
 	return interval
 }
 
+// wakeSignal wakes all idle workers at once. Workers call C() before fetching and
+// wait on that channel if the fetch came back empty. Broadcast closes the current
+// channel and swaps in a new one, so a publish that lands between the empty fetch
+// and the wait still wakes the worker.
+type wakeSignal struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func newWakeSignal() *wakeSignal {
+	return &wakeSignal{ch: make(chan struct{})}
+}
+
+// C returns the channel that the next Broadcast will close.
+func (w *wakeSignal) C() <-chan struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.ch
+}
+
+// Broadcast wakes every goroutine currently waiting on a channel from C.
+func (w *wakeSignal) Broadcast() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	close(w.ch)
+	w.ch = make(chan struct{})
+}
+
 // HadesNATSConsumer manages job consumption from the NATS queue system with priority handling.
 type HadesNATSConsumer struct {
 	natsConnection *nats.Conn
@@ -149,6 +177,7 @@ type HadesNATSConsumer struct {
 	maxDeliver     int
 	consumers      map[hades.Priority]jetstream.Consumer
 	kv             jetstream.KeyValue
+	wake           *wakeSignal
 }
 
 // NewHadesConsumer creates a new job consumer with priority queue support.
@@ -208,6 +237,7 @@ func NewHadesConsumer(nc *nats.Conn, cfg ConsumerConfig) (*HadesNATSConsumer, er
 		ackWait:        cfg.AckWait,
 		maxDeliver:     cfg.MaxDeliver,
 		kv:             kv,
+		wake:           newWakeSignal(),
 	}, nil
 }
 
@@ -217,6 +247,23 @@ func NewHadesConsumer(nc *nats.Conn, cfg ConsumerConfig) (*HadesNATSConsumer, er
 // fair distribution across multiple consumer instances.
 func (hc *HadesNATSConsumer) DequeueJob(ctx context.Context, processing hades.PayloadHandler) {
 	var wg sync.WaitGroup
+
+	// A plain subscription on the job subjects, used only to wake idle workers.
+	// Jobs are still fetched and acked through the JetStream consumers, which keeps
+	// the priority order and means nothing is pulled before a worker is free.
+	sub, err := hc.natsConnection.Subscribe(allJobsSubject, func(*nats.Msg) {
+		hc.wake.Broadcast()
+	})
+	if err != nil {
+		// Polling alone is still correct, just slower to notice new jobs.
+		slog.Warn("Failed to subscribe to job wake-up signal, falling back to polling", "error", err)
+	} else {
+		defer func() {
+			if err := sub.Unsubscribe(); err != nil {
+				slog.Warn("Failed to unsubscribe job wake-up signal", "error", err)
+			}
+		}()
+	}
 
 	// Create workers that fetch their own jobs (pull model instead of push)
 	for i := uint(0); i < hc.concurrency; i++ {
@@ -241,7 +288,9 @@ func (hc *HadesNATSConsumer) DequeueJob(ctx context.Context, processing hades.Pa
 
 // workerLoop handles the fetch-process loop for a single worker
 func (hc *HadesNATSConsumer) workerLoop(ctx context.Context, workerID uint, processing hades.PayloadHandler) {
-	// Exponential backoff for when no messages are available
+	// Exponential backoff for when no messages are available. The wake-up
+	// subscription covers new jobs, but redeliveries (AckWait, NakWithDelay)
+	// don't publish anything, so we still have to poll for those.
 
 	const resetBackoff = 10 * time.Millisecond
 	const maxBackoff = 1 * time.Second
@@ -255,12 +304,21 @@ func (hc *HadesNATSConsumer) workerLoop(ctx context.Context, workerID uint, proc
 		default:
 		}
 
+		// Grab the wake channel before fetching so a publish that lands after
+		// the fetch came back empty still ends the wait below.
+		wake := hc.wake.C()
+
 		// Only fetch when this worker is ready to process
 		msg, priority, found := hc.fetchNextMessage(ctx)
 
 		// If no message was found in any queue, sleep with backoff and retry
 		if !found {
 			select {
+			case <-wake:
+				// All idle workers wake up but only one gets the job. Keep the
+				// backoff so the others don't go back to polling every 10ms; a
+				// successful fetch resets it.
+				continue
 			case <-time.After(backoff):
 				backoff = min(backoff*2, maxBackoff)
 				continue

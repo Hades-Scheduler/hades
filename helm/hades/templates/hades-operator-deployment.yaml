@@ -55,6 +55,8 @@ spec:
               value: {{ .Values.hadesOperator.logDrainTimeout | quote }}
             - name: FINALIZER_IMAGE
               value: {{ .Values.hadesOperator.finalizerImage | quote }}
+            - name: K8S_IMAGE_PULL_POLICY
+              value: {{ .Values.hadesOperator.imagePullPolicy | quote }}
             {{- if not .Values.hadesOperator.clusterWide }}
             - name: WATCH_NAMESPACE
               value: {{ default .Release.Namespace .Values.hadesOperator.targetNamespace | quote }}

@@ -71,6 +71,10 @@ type OperatorConfig struct {
 	// init containers, so this one only has to run `sh -c "echo build finished"`.
 	// Override it for clusters that cannot reach Docker Hub, or to use a mirror.
 	FinalizerImage string `env:"FINALIZER_IMAGE" envDefault:"busybox:1.37.0"`
+	// ImagePullPolicy sets imagePullPolicy on every step container: always,
+	// if-not-present or never. If empty, Kubernetes pulls :latest and untagged
+	// images on every step.
+	ImagePullPolicy string `env:"K8S_IMAGE_PULL_POLICY"`
 }
 
 // normalize replaces non-positive tuning values with their defaults. A
@@ -141,6 +145,11 @@ func main() {
 	}
 
 	operatorConfig.normalize()
+	pullPolicy, err := controller.ParseImagePullPolicy(operatorConfig.ImagePullPolicy)
+	if err != nil {
+		setupLog.Error(err, "invalid K8S_IMAGE_PULL_POLICY")
+		os.Exit(1)
+	}
 
 	if nsConfig.WatchNamespace != "" {
 		setupLog.Info("scoping cache to a single namespace", "namespace", nsConfig.WatchNamespace)
@@ -219,6 +228,7 @@ func main() {
 		"requeue_delay", operatorConfig.RequeueDelay,
 		"log_drain_timeout", operatorConfig.LogDrainTimeout,
 		"finalizer_image", operatorConfig.FinalizerImage,
+		"image_pull_policy", operatorConfig.ImagePullPolicy,
 		"metrics_addr", metricsAddr,
 		"dev_mode", enableDevMode,
 		"nats_url", natsConfig.URL,
@@ -252,6 +262,7 @@ func main() {
 		RequeueDelay:     operatorConfig.RequeueDelay,
 		LogDrainTimeout:  operatorConfig.LogDrainTimeout,
 		FinalizerImage:   operatorConfig.FinalizerImage,
+		ImagePullPolicy:  pullPolicy,
 		Publisher:        publisher,
 		LogStreams:       controller.NewLogStreamRegistry(),
 	}).SetupWithManager(mgr); err != nil {

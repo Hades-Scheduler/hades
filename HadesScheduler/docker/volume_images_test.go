@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,4 +105,49 @@ func TestPrefetchHonoursPolicy(t *testing.T) {
 	require.Empty(t, pulled)
 	require.NoError(t, res["local"])
 	require.ErrorContains(t, res["remote"], "not present locally")
+}
+
+func TestNeedsPullSkipsKnownResults(t *testing.T) {
+	p := imagePuller{policy: PullAlways, recent: func(img string) bool { return img == "fresh:1" }}
+	require.True(t, p.needsPull("alpine:3", true))
+	require.False(t, p.needsPull("alpine@sha256:abc", true), "a present digest cannot change")
+	require.True(t, p.needsPull("alpine@sha256:abc", false), "an absent digest still has to be pulled")
+	require.False(t, p.needsPull("fresh:1", true))
+	require.True(t, p.needsPull("fresh:1", false))
+}
+
+func TestPullCoalescerSharesInflightPull(t *testing.T) {
+	c := newPullCoalescer(time.Minute)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	pull := func(context.Context) error {
+		calls.Add(1)
+		<-release
+		return nil
+	}
+
+	// The first job is cancelled while the pull runs; the second must still
+	// get the shared result instead of the first job's cancellation.
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	errs := make(chan error, 2)
+	go func() { errs <- c.pull(ctx1, "img", pull) }()
+	require.Eventually(t, func() bool { return calls.Load() == 1 }, time.Second, time.Millisecond)
+	go func() { errs <- c.pull(context.Background(), "img", pull) }()
+	cancel1()
+	require.ErrorIs(t, <-errs, context.Canceled)
+	require.False(t, c.recentlyPulled("img"))
+	close(release)
+	require.NoError(t, <-errs)
+
+	require.Equal(t, int32(1), calls.Load())
+	require.True(t, c.recentlyPulled("img"))
+	require.False(t, newPullCoalescer(0).recentlyPulled("img"))
+}
+
+func TestPullCoalescerDoesNotCacheFailures(t *testing.T) {
+	c := newPullCoalescer(time.Minute)
+	boom := errors.New("boom")
+	require.ErrorIs(t, c.pull(context.Background(), "img", func(context.Context) error { return boom }), boom)
+	require.False(t, c.recentlyPulled("img"))
+	require.NoError(t, c.pull(context.Background(), "img", func(context.Context) error { return nil }))
 }

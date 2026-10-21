@@ -218,6 +218,22 @@ type imagePuller struct {
 	present func(ctx context.Context, image string) bool
 	pull    func(ctx context.Context, image string) error
 	record  func(step int, start, end time.Time, cached bool)
+	// recent reports whether the image was pulled within the freshness window.
+	// Nil means never.
+	recent func(image string) bool
+}
+
+// needsPull applies the policy, but skips a pull of a present image whose
+// result is already known: a digest-pinned reference, or one pulled within
+// the freshness window.
+func (p imagePuller) needsPull(image string, cached bool) bool {
+	if !p.policy.shouldPull(cached) {
+		return false
+	}
+	if cached && (isDigestPinned(image) || (p.recent != nil && p.recent(image))) {
+		return false
+	}
+	return true
 }
 
 // pendingImage is the result of one image's prefetch. err is set once done closes.
@@ -248,7 +264,7 @@ func (p imagePuller) prefetch(ctx context.Context, refs []imageRef) map[string]*
 			cached := p.present(ctx, ref.image)
 			start := time.Now()
 			switch {
-			case p.policy.shouldPull(cached):
+			case p.needsPull(ref.image, cached):
 				pi.err = p.pull(ctx, ref.image)
 			case !cached:
 				// Only reachable under PullNever. Fail here rather than letting

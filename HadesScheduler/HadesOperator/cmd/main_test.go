@@ -7,10 +7,12 @@ import (
 
 	"github.com/hades-scheduler/hades/HadesScheduler/HadesOperator/internal/controller"
 	"github.com/hades-scheduler/hades/shared/utils"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
-// An operator started without any tuning env vars must behave exactly as before
-// these knobs existed.
+// An operator started without any tuning env vars gets the documented defaults.
 func TestOperatorConfigDefaults(t *testing.T) {
 	clearOperatorEnv(t)
 
@@ -25,6 +27,9 @@ func TestOperatorConfigDefaults(t *testing.T) {
 	}
 	if cfg.MaxParallelism != DefaultMaxParallelism {
 		t.Errorf("MaxParallelism = %d, want %d", cfg.MaxParallelism, DefaultMaxParallelism)
+	}
+	if cfg.MaxConcurrentReconciles != controller.DefaultMaxConcurrentReconciles {
+		t.Errorf("MaxConcurrentReconciles = %d, want %d", cfg.MaxConcurrentReconciles, controller.DefaultMaxConcurrentReconciles)
 	}
 	if !cfg.DeleteOnComplete {
 		t.Error("DeleteOnComplete = false, want true")
@@ -65,6 +70,7 @@ func TestOperatorConfigNormalizeFallsBackOnNonPositive(t *testing.T) {
 			t.Setenv("REQUEUE_DELAY", tt.requeueDelay)
 			t.Setenv("LOG_DRAIN_TIMEOUT", tt.logDrainTimeout)
 			t.Setenv("MAX_PARALLELISM", "0")
+			t.Setenv("MAX_CONCURRENT_RECONCILES", "-1")
 
 			cfg := loadOperatorConfig(t)
 			cfg.normalize()
@@ -77,6 +83,9 @@ func TestOperatorConfigNormalizeFallsBackOnNonPositive(t *testing.T) {
 			}
 			if cfg.MaxParallelism != DefaultMaxParallelism {
 				t.Errorf("MaxParallelism = %d, want %d", cfg.MaxParallelism, DefaultMaxParallelism)
+			}
+			if cfg.MaxConcurrentReconciles != controller.DefaultMaxConcurrentReconciles {
+				t.Errorf("MaxConcurrentReconciles = %d, want %d", cfg.MaxConcurrentReconciles, controller.DefaultMaxConcurrentReconciles)
 			}
 		})
 	}
@@ -107,7 +116,7 @@ func loadOperatorConfig(t *testing.T) OperatorConfig {
 // cannot leak into the assertions, restoring them when the test ends.
 func clearOperatorEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"DELETE_ON_COMPLETE", "MAX_PARALLELISM", "REQUEUE_DELAY", "LOG_DRAIN_TIMEOUT", "K8S_IMAGE_PULL_POLICY"} {
+	for _, k := range []string{"DELETE_ON_COMPLETE", "MAX_PARALLELISM", "REQUEUE_DELAY", "LOG_DRAIN_TIMEOUT", "K8S_IMAGE_PULL_POLICY", "MAX_CONCURRENT_RECONCILES"} {
 		if old, ok := os.LookupEnv(k); ok {
 			t.Cleanup(func() { _ = os.Setenv(k, old) })
 		}
@@ -128,5 +137,41 @@ func TestOperatorConfigImagePullPolicy(t *testing.T) {
 	got, err := controller.ParseImagePullPolicy(cfg.ImagePullPolicy)
 	if err != nil || got != "IfNotPresent" {
 		t.Errorf("ParseImagePullPolicy(%q) = %q, %v", cfg.ImagePullPolicy, got, err)
+	}
+}
+
+// The pod informer must be label-filtered in both watch modes, and the
+// namespace scope must only be set when WATCH_NAMESPACE is.
+func TestCacheOptions(t *testing.T) {
+	podSelector := func(t *testing.T, opts cache.Options) labels.Selector {
+		t.Helper()
+		for obj, by := range opts.ByObject {
+			if _, ok := obj.(*corev1.Pod); ok {
+				if by.Namespaces != nil {
+					t.Errorf("pod ByObject.Namespaces = %v, want nil so it inherits DefaultNamespaces", by.Namespaces)
+				}
+				return by.Label
+			}
+		}
+		t.Fatal("no ByObject entry for pods")
+		return nil
+	}
+	managed := labels.Set{controller.LabelManagedBy: controller.ManagedByValue}
+	foreign := labels.Set{"app": "something-else"}
+
+	for _, ns := range []string{"", "hades"} {
+		opts := cacheOptions(ns)
+		sel := podSelector(t, opts)
+		if !sel.Matches(managed) || sel.Matches(foreign) {
+			t.Errorf("ns=%q: pod selector %q does not select exactly operator pods", ns, sel)
+		}
+		if ns == "" && opts.DefaultNamespaces != nil {
+			t.Errorf("cluster-wide: DefaultNamespaces = %v, want nil", opts.DefaultNamespaces)
+		}
+		if ns != "" {
+			if _, ok := opts.DefaultNamespaces[ns]; !ok || len(opts.DefaultNamespaces) != 1 {
+				t.Errorf("namespaced: DefaultNamespaces = %v, want only %q", opts.DefaultNamespaces, ns)
+			}
+		}
 	}
 }

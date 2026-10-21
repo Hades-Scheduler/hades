@@ -19,7 +19,7 @@ import (
 const JobNameLabel = "job-name=%s"
 
 type PodLogReader struct {
-	K8sClient *kubernetes.Clientset
+	K8sClient kubernetes.Interface
 	Namespace string
 	JobID     string
 	Publisher log.NATSPublisher
@@ -122,28 +122,28 @@ func (pl PodLogReader) StreamContainerLogs(ctx context.Context, podName, contain
 	)
 }
 
-// Resolves the pod name for the given JobID
+// ErrPodNotFound is returned by ResolvePod while the Job has no pod, e.g.
+// because it is suspended or the Job controller has not created the pod yet.
+var ErrPodNotFound = errors.New("pod not found")
+
+// ResolvePod returns the pod the Job controller created for the given JobID.
+// Pods are named <job>-<random>, so they can only be found through the
+// job-name label the Job controller puts on them.
 // Used in both Scheduler and Operator modes
-func (pl PodLogReader) ResolvePodName(ctx context.Context) (string, error) {
-	cli := pl.K8sClient.CoreV1().Pods(pl.Namespace)
-
-	// if we have a pod name, return
-	if p, err := cli.Get(ctx, pl.JobID, metav1.GetOptions{}); err == nil {
-		return p.Name, nil
-	}
-
-	// else: find the pod name by looking at the job name
+func (pl PodLogReader) ResolvePod(ctx context.Context) (*corev1.Pod, error) {
 	jobName := fmt.Sprintf(buildlogs.JobNamePrefix, pl.JobID)
-	if lst, err := cli.List(ctx, metav1.ListOptions{
+	lst, err := pl.K8sClient.CoreV1().Pods(pl.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf(JobNameLabel, jobName),
-	}); err == nil {
-		if len(lst.Items) == 1 {
-			return lst.Items[0].Name, nil
-		}
-		if len(lst.Items) > 1 {
-			return "", fmt.Errorf("found multiple pods with label job-name=%s; expected exactly 1", jobName)
-		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing pods for job %s: %w", jobName, err)
 	}
-
-	return "", fmt.Errorf("pod for jobID %s not found yet", pl.JobID)
+	switch len(lst.Items) {
+	case 0:
+		return nil, fmt.Errorf("pod for jobID %s: %w", pl.JobID, ErrPodNotFound)
+	case 1:
+		return &lst.Items[0], nil
+	default:
+		return nil, fmt.Errorf("found multiple pods with label job-name=%s; expected exactly 1", jobName)
+	}
 }

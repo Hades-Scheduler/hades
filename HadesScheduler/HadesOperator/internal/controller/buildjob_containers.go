@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -10,15 +11,21 @@ import (
 	buildv1 "github.com/hades-scheduler/hades/HadesScheduler/HadesOperator/api/v1"
 	"github.com/hades-scheduler/hades/hadesScheduler/k8s"
 	"github.com/hades-scheduler/hades/shared/buildlogs"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const FinalizerContainerName = "buildjob-finalizer"
+
+// streamEOFGrace is how long a cleanly ended log stream of a container the pod
+// still reports as running is left alone before it is treated as broken and
+// restarted. Pod status lags the stream's EOF by the kubelet's status sync, which
+// is normally well under a second.
+const streamEOFGrace = 5 * time.Second
 
 // DefaultFinalizerImage is the image for the pod's main container. Every
 // BuildJob pod needs one, because Kubernetes requires at least one non-init
@@ -110,67 +117,75 @@ func allTerminatedLogsPublished(pod *corev1.Pod, statuses []buildv1.ContainerSta
 	return drained(pod.Status.InitContainerStatuses) && drained(pod.Status.ContainerStatuses)
 }
 
-// logsDrained reports whether all terminated containers of the BuildJob's pod have
-// had their logs published. podGone is true only when the pod is confirmed gone
-// (a NotFound result), so the caller proceeds to delete rather than requeue; any
-// other error is returned so the caller retries instead of deleting and losing
-// logs.
-func (r *BuildJobReconciler) logsDrained(ctx context.Context, bj *buildv1.BuildJob) (drained bool, podGone bool, err error) {
-	// Re-read the latest status: updateContainerStatuses (run earlier in this
-	// reconcile) records the pod name and the freshest LogsPublished flags on a
-	// separately fetched object.
-	var fresh buildv1.BuildJob
-	if err := r.Get(ctx, client.ObjectKeyFromObject(bj), &fresh); err != nil {
-		return false, false, err
-	}
-
-	podName := fresh.Status.PodName
-	if podName == "" {
-		// The pod name has not been recorded yet, so we cannot confirm the pod is
-		// gone. Do not delete; let the caller requeue (the drain timeout is the
-		// backstop against waiting forever).
-		return false, false, nil
-	}
-
-	p, err := r.K8sClient.CoreV1().Pods(bj.Namespace).Get(ctx, podName, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			// The pod is confirmed gone; its logs are unrecoverable.
-			return false, true, nil
-		}
-		// Transient/API/authorization error: propagate so the caller retries
-		// instead of deleting the BuildJob and losing logs.
-		return false, false, err
-	}
-
-	return allTerminatedLogsPublished(p, fresh.Status.ContainerStatuses), false, nil
+// containerSnapshot is what one updateContainerStatuses pass observed and wrote.
+// The caller keeps using it for the rest of the reconcile instead of re-reading
+// the pod or the BuildJob: the informer cache would hand back the pre-write
+// BuildJob, and another pod GET is an API round trip for data already in hand.
+type containerSnapshot struct {
+	// draining is true while a terminated container's live log stream is still
+	// publishing.
+	draining bool
+	pod      *corev1.Pod
+	statuses []buildv1.ContainerStatus
 }
 
-// updateContainerStatuses resolves PodName using the BuildJob and updates each
-// BuildJob's container statuses accordingly. It returns draining=true when at
-// least one container has terminated but its live log stream has not finished
-// publishing, signalling the caller to requeue so the job is not finalized (and
-// its pod deleted) before the tail logs are captured.
-func (r *BuildJobReconciler) updateContainerStatuses(ctx context.Context, bj *buildv1.BuildJob) (draining bool, pod *corev1.Pod, err error) {
-	slog.Info("Updating container statuses for BuildJob", "buildJob", bj.Name)
+// errBuildJobFinalized means the live BuildJob is already terminal or being
+// deleted although the cached copy the reconcile started from was not.
+var errBuildJobFinalized = errors.New("BuildJob already finalized")
 
-	pl := r.podLogReader(bj.Namespace, bj.Name)
-
-	podName, err := pl.ResolvePodName(ctx)
-	if err != nil {
-		slog.Error("Failed to resolve pod name", "error", err)
-		return false, nil, err
+// resolvePod finds the BuildJob's pod. Jobs created by this operator version
+// stamp LabelBuildJob on the pod template, so their pods are in the
+// label-filtered informer cache and lookups cost no API call. Jobs created
+// before that label existed have unlabelled pods the cache never sees; those
+// fall back to a live List by the Job controller's job-name label.
+func (r *BuildJobReconciler) resolvePod(ctx context.Context, bj *buildv1.BuildJob, job *batchv1.Job) (*corev1.Pod, error) {
+	if job.Spec.Template.Labels[LabelBuildJob] == "" {
+		return r.podLogReader(bj.Namespace, bj.Name).ResolvePod(ctx)
 	}
 
-	p, err := r.K8sClient.CoreV1().Pods(bj.Namespace).Get(ctx, podName, metav1.GetOptions{})
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(bj.Namespace),
+		client.MatchingLabels{LabelBuildJob: bj.Name},
+	); err != nil {
+		return nil, fmt.Errorf("listing pods of BuildJob %s: %w", bj.Name, err)
+	}
+	switch len(pods.Items) {
+	case 0:
+		return nil, fmt.Errorf("pod for BuildJob %s: %w", bj.Name, k8s.ErrPodNotFound)
+	case 1:
+		return &pods.Items[0], nil
+	default:
+		return nil, fmt.Errorf("found %d pods for BuildJob %s; expected exactly 1", len(pods.Items), bj.Name)
+	}
+}
+
+// updateContainerStatuses resolves the BuildJob's pod and updates the BuildJob's
+// container statuses accordingly. The returned snapshot has draining=true when
+// at least one container has terminated but its live log stream has not
+// finished publishing, signalling the caller to requeue so the job is not
+// finalized (and its pod deleted) before the tail logs are captured.
+func (r *BuildJobReconciler) updateContainerStatuses(ctx context.Context, bj *buildv1.BuildJob, job *batchv1.Job) (containerSnapshot, error) {
+	slog.Debug("Updating container statuses for BuildJob", "buildJob", bj.Name)
+
+	p, err := r.resolvePod(ctx, bj, job)
 	if err != nil {
-		return false, nil, err
+		return containerSnapshot{}, err
 	}
 
+	snap := containerSnapshot{pod: p}
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Read uncached. The statuses below decide whether a container's log
+		// stream is (re)started from LogsStreamedUntil, and pod and stream events
+		// trigger reconciles faster than the BuildJob cache catches up with the
+		// previous reconcile's write. A stale LogsPublished=false would restart a
+		// finished stream and republish its logs.
 		var fresh buildv1.BuildJob
-		if err := r.Get(ctx, client.ObjectKeyFromObject(bj), &fresh); err != nil {
+		if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(bj), &fresh); err != nil {
 			return err
+		}
+		if !fresh.DeletionTimestamp.IsZero() || phaseFinal(fresh.Status.Phase) {
+			return errBuildJobFinalized
 		}
 
 		// Build map of current statuses from container status slice for easy lookup
@@ -194,17 +209,21 @@ func (r *BuildJobReconciler) updateContainerStatuses(ctx context.Context, bj *bu
 
 		// A terminated container whose logs are not yet published still has a log
 		// stream draining; keep requeueing until it finishes.
-		draining = false
+		snap.draining = false
 		for _, cs := range newStatuses {
 			if (cs.State == buildv1.ContainerStateSucceeded || cs.State == buildv1.ContainerStateFailed) && !cs.LogsPublished {
-				draining = true
+				snap.draining = true
 				break
 			}
 		}
+		snap.statuses = newStatuses
 
 		return r.writeContainerStatuses(ctx, &fresh, newStatuses, currentStep, p.Name)
 	})
-	return draining, p, err
+	if err != nil {
+		return containerSnapshot{}, err
+	}
+	return snap, nil
 }
 
 // writeContainerStatuses skips the update when nothing changed. Every status write
@@ -311,18 +330,26 @@ func (r *BuildJobReconciler) updateContainerStateMap(ctx context.Context, bj *bu
 	terminated := cs.State == buildv1.ContainerStateSucceeded || cs.State == buildv1.ContainerStateFailed
 	key := logStreamKey(bj.Namespace, bj.Name, cs.Name)
 
-	// If the stream for a still-running container has already finished, it must
-	// have failed: a healthy follow stays open until the container stops. Drop the
-	// entry so the block below re-establishes it (from the persisted offset)
-	// instead of leaving it dead until termination; the running-job requeue drives
-	// the retry.
+	// If the stream for a still-running container has already finished, it either
+	// failed or the container exited and the pod status has not caught up yet: the
+	// clean end of a follow stream wakes this reconcile immediately, often before
+	// the kubelet has reported the termination. Restarting in that window would
+	// republish the container's logs, so a clean end is trusted for
+	// streamEOFGrace. Past that (or on error) drop the entry so the block below
+	// re-establishes it from the persisted offset; the resync requeue drives the
+	// retry.
 	if !terminated && !cs.LogsPublished {
 		if stream := r.logStreams().get(key); stream != nil {
-			if finished, streamErr := stream.result(); finished {
-				if streamErr != nil {
-					slog.Warn("Container log stream failed while running; restarting", "container", cs.Name, "error", streamErr)
+			if finished, at, streamErr := stream.resultAt(); finished && (streamErr != nil || time.Since(at) >= streamEOFGrace) {
+				// The kubelet can lag by more than the grace period. Restarting
+				// a cleanly ended stream of a container that did exit would
+				// republish its logs, so confirm against the live pod first.
+				if streamErr == nil && !r.containerLiveRunning(ctx, p, cs.Name) {
+					slog.Debug("Log stream ended and live pod shows container stopped; waiting for cache", "container", cs.Name)
+				} else {
+					slog.Warn("Container log stream ended while running; restarting", "container", cs.Name, "error", streamErr)
+					r.logStreams().remove(key)
 				}
-				r.logStreams().remove(key)
 			}
 		}
 	}
@@ -361,18 +388,41 @@ func (r *BuildJobReconciler) updateContainerStateMap(ctx context.Context, bj *bu
 		if stream := r.logStreams().get(key); stream != nil {
 			if finished, streamErr := stream.result(); finished {
 				if streamErr == nil {
+					// Keep the finished entry until stopJob: it is what stops
+					// ensureStarted above from following the container again if
+					// a later pass works from a BuildJob that does not show
+					// LogsPublished yet.
 					cs.LogsPublished = true
 				} else {
 					slog.Error("Container log stream failed; will retry", "container", cs.Name, "error", streamErr)
+					// The next reconcile re-establishes it from the persisted offset.
+					r.logStreams().remove(key)
 				}
-				// Drop the entry either way: on success it is done; on failure the
-				// next reconcile re-establishes it (from the persisted offset).
-				r.logStreams().remove(key)
 			}
 		}
 	}
 
 	return cs
+}
+
+// containerLiveRunning reports whether the live pod (bypassing the cache) still
+// shows the named container as running. Any doubt (a failed read, a missing
+// pod or container) counts as not running, which only delays a stream restart
+// until the next resync instead of risking duplicate logs.
+func (r *BuildJobReconciler) containerLiveRunning(ctx context.Context, cached *corev1.Pod, name string) bool {
+	var live corev1.Pod
+	if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(cached), &live); err != nil {
+		slog.Warn("Failed to read live pod; not restarting log stream yet", "pod", cached.Name, "error", err)
+		return false
+	}
+	for _, list := range [][]corev1.ContainerStatus{live.Status.InitContainerStatuses, live.Status.ContainerStatuses} {
+		for _, cs := range list {
+			if cs.Name == name {
+				return cs.State.Running != nil
+			}
+		}
+	}
+	return false
 }
 
 // throttledStreamOffset returns the LogsStreamedUntil value to persist. It keeps

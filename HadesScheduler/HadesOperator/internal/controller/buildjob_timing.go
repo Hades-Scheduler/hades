@@ -10,12 +10,11 @@ import (
 	"github.com/hades-scheduler/hades/hadesScheduler/k8s"
 	"github.com/hades-scheduler/hades/shared/timing"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // maxReconcileLag caps reconcile_detection_lag. In steady state the gap between
-// the last step finishing and the operator observing completion is the requeue
-// poll (2s) plus the finalizer and log-drain gate (up to ~45s). After an
+// the last step finishing and the operator observing completion is the finalizer
+// container plus the log-drain gate (up to ~45s). After an
 // operator restart or a reconcile backlog it can be far larger; capping keeps a
 // single anomalous job from dominating the overhead rollup.
 const maxReconcileLag = 2 * time.Minute
@@ -23,12 +22,13 @@ const maxReconcileLag = 2 * time.Minute
 // emitJobTiming records a completed BuildJob's overhead/runtime breakdown,
 // derived from the pod's init-container timestamps (which Kubernetes records but
 // Hades otherwise never reads). It is best-effort: any failure is logged and the
-// job is unaffected. Called once, at the terminal transition.
+// job is unaffected. Called once, at the terminal transition, with the pod the
+// reconcile already resolved.
 //
 // Accuracy note: Kubernetes stores container timestamps to whole-second
 // precision, so sub-second steps read as 0-1s here; the Docker executor's
 // phases stay millisecond-precise.
-func (r *BuildJobReconciler) emitJobTiming(ctx context.Context, bj *buildv1.BuildJob) {
+func (r *BuildJobReconciler) emitJobTiming(ctx context.Context, bj *buildv1.BuildJob, pod *corev1.Pod) {
 	// Continue the trace propagated from the API, if any. Skip Extract for an
 	// absent annotation so an empty carrier does not touch the context.
 	traceCtx := ctx
@@ -57,16 +57,6 @@ func (r *BuildJobReconciler) emitJobTiming(ctx context.Context, bj *buildv1.Buil
 	// is clamped to zero by Record.
 	if !submittedAt.IsZero() {
 		timer.Record(0, timing.PhaseQueueWait, submittedAt, bj.CreationTimestamp.Time)
-	}
-
-	podName := bj.Status.PodName
-	if podName == "" {
-		return
-	}
-	pod, err := r.K8sClient.CoreV1().Pods(bj.Namespace).Get(ctx, podName, metav1.GetOptions{})
-	if err != nil {
-		slog.Warn("timing: failed to fetch pod for job timing", "error", err, "buildJob", bj.Name)
-		return
 	}
 
 	recordStepTiming(timer, bj, pod.Status.InitContainerStatuses)
@@ -114,7 +104,7 @@ func recordStepTiming(timer *timing.JobTimer, bj *buildv1.BuildJob, initStatuses
 	}
 
 	// reconcile_detection_lag: last step finishing -> the operator observing
-	// completion now. Dominated by the requeue poll and log-drain gate, so it is a
+	// completion now. Dominated by the finalizer and log-drain gate, so it is a
 	// distinct phase rather than silently inflating teardown. Capped so an
 	// operator restart or backlog cannot make one job dominate the overhead
 	// rollup.

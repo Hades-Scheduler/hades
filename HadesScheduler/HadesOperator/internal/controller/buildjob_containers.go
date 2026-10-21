@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	buildv1 "github.com/hades-scheduler/hades/HadesScheduler/HadesOperator/api/v1"
 	"github.com/hades-scheduler/hades/hadesScheduler/k8s"
 	"github.com/hades-scheduler/hades/shared/buildlogs"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
@@ -187,14 +189,8 @@ func (r *BuildJobReconciler) updateContainerStatuses(ctx context.Context, bj *bu
 			statusMap[containerCS.Name] = r.updateContainerStateMap(ctx, bj, p, statusMap, containerCS)
 		}
 
-		// Determine current step
 		currentStep := r.determineCurrentStep(p, len(bj.Spec.Steps))
-
-		// Convert map back to slice
-		newStatuses := make([]buildv1.ContainerStatus, 0, len(statusMap))
-		for _, cs := range statusMap {
-			newStatuses = append(newStatuses, cs)
-		}
+		newStatuses := orderedContainerStatuses(bj.Spec.Steps, statusMap)
 
 		// A terminated container whose logs are not yet published still has a log
 		// stream draining; keep requeueing until it finishes.
@@ -206,14 +202,56 @@ func (r *BuildJobReconciler) updateContainerStatuses(ctx context.Context, bj *bu
 			}
 		}
 
-		// Update BuildJob status
-
-		fresh.Status.ContainerStatuses = newStatuses
-		fresh.Status.CurrentStep = &currentStep
-		fresh.Status.PodName = p.Name
-		return r.Status().Update(ctx, &fresh)
+		return r.writeContainerStatuses(ctx, &fresh, newStatuses, currentStep, p.Name)
 	})
 	return draining, p, err
+}
+
+// writeContainerStatuses skips the update when nothing changed. Every status write
+// bumps the resourceVersion and the watch turns that straight into another
+// reconcile, so writing on every pass keeps a running job reconciling in a tight
+// loop instead of on the requeue delay.
+func (r *BuildJobReconciler) writeContainerStatuses(ctx context.Context, fresh *buildv1.BuildJob, statuses []buildv1.ContainerStatus, currentStep int32, podName string) error {
+	if equality.Semantic.DeepEqual(fresh.Status.ContainerStatuses, statuses) &&
+		fresh.Status.CurrentStep != nil && *fresh.Status.CurrentStep == currentStep &&
+		fresh.Status.PodName == podName {
+		return nil
+	}
+
+	fresh.Status.ContainerStatuses = statuses
+	fresh.Status.CurrentStep = &currentStep
+	fresh.Status.PodName = podName
+	return r.Status().Update(ctx, fresh)
+}
+
+// orderedContainerStatuses returns the statuses in a fixed order: steps in spec
+// order, then the finalizer, then anything else sorted by name. Map order is
+// random, and an unordered slice would never compare equal to the stored one.
+func orderedContainerStatuses(steps []buildv1.BuildStep, statusMap map[string]buildv1.ContainerStatus) []buildv1.ContainerStatus {
+	out := make([]buildv1.ContainerStatus, 0, len(statusMap))
+	seen := make(map[string]bool, len(statusMap))
+	add := func(name string) {
+		if cs, ok := statusMap[name]; ok && !seen[name] {
+			out = append(out, cs)
+			seen[name] = true
+		}
+	}
+	for _, step := range steps {
+		add(fmt.Sprintf(BuildStepPrefix, step.ID))
+	}
+	add(FinalizerContainerName)
+
+	var rest []string
+	for name := range statusMap {
+		if !seen[name] {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+	for _, name := range rest {
+		add(name)
+	}
+	return out
 }
 
 // terminalWaitingReasons are container Waiting.Reason values that do not clear on

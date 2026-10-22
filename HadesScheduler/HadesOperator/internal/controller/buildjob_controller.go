@@ -91,6 +91,15 @@ const phasePending = "Pending"
 // BuildJobReconciler reconciles a BuildJob object
 type BuildJobReconciler struct {
 	client.Client
+	// APIReader reads straight from the API server, bypassing the manager's
+	// informer cache. Admission MUST use it: the cached client is eventually
+	// consistent, so counting running Jobs through it is a read-modify-write
+	// race. Under a burst the cache had not yet observed the Jobs created by
+	// the immediately preceding reconciles, every one of them counted the same
+	// stale total, and the limit stopped binding - measured at 59 concurrent
+	// Jobs against MaxParallelism=16. A deadline burst is exactly the case
+	// admission exists for, so the extra round-trip is the right trade.
+	APIReader        client.Reader
 	Scheme           *runtime.Scheme
 	K8sClient        *kubernetes.Clientset
 	NatsConnection   *nats.Conn
@@ -817,9 +826,20 @@ func jobCompletionTime(k8sJob *batchv1.Job) time.Time {
 }
 
 // countActiveJobs counts the number of non-completed, non-suspended Jobs in the given namespace.
+// admissionReader returns the reader admission decisions must use. It is the
+// uncached APIReader when wired; it falls back to the cached client only so
+// tests and any caller that has not set it keep working, never as a default
+// worth relying on.
+func (r *BuildJobReconciler) admissionReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 func (r *BuildJobReconciler) countActiveJobs(ctx context.Context, namespace string) (uint, error) {
 	var jl batchv1.JobList
-	if err := r.List(ctx, &jl,
+	if err := r.admissionReader().List(ctx, &jl,
 		client.InNamespace(namespace),
 		client.MatchingLabels{LabelManagedBy: ManagedByValue},
 	); err != nil {
@@ -842,7 +862,10 @@ func (r *BuildJobReconciler) countActiveJobs(ctx context.Context, namespace stri
 // admitOneSuspendedJob unsuspends the oldest suspended Job in the given namespace, if any.
 func (r *BuildJobReconciler) admitOneSuspendedJob(ctx context.Context, namespace string) error {
 	var jl batchv1.JobList
-	if err := r.List(ctx, &jl,
+	// Uncached for the same reason as countActiveJobs: picking from a stale
+	// list can admit a Job that another reconcile already unsuspended, which
+	// overshoots the limit instead of holding it.
+	if err := r.admissionReader().List(ctx, &jl,
 		client.InNamespace(namespace),
 		client.MatchingLabels{LabelManagedBy: ManagedByValue},
 	); err != nil {

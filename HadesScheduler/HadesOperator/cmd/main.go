@@ -254,7 +254,9 @@ func main() {
 	}
 
 	if err := (&controller.BuildJobReconciler{
-		Client:           mgr.GetClient(),
+		Client: mgr.GetClient(),
+		// Uncached reader for admission counting; see BuildJobReconciler.APIReader.
+		APIReader:        mgr.GetAPIReader(),
 		Scheme:           mgr.GetScheme(),
 		K8sClient:        kcs,
 		DeleteOnComplete: operatorConfig.DeleteOnComplete,

@@ -861,6 +861,26 @@ func (r *BuildJobReconciler) countActiveJobs(ctx context.Context, namespace stri
 
 // admitOneSuspendedJob unsuspends the oldest suspended Job in the given namespace, if any.
 func (r *BuildJobReconciler) admitOneSuspendedJob(ctx context.Context, namespace string) error {
+	// Capacity check before admitting, not just "one out, one in".
+	//
+	// This function is reached from several completion paths, so a batch of
+	// Jobs finishing at once drives several reconciles that each admit one,
+	// without any of them asking whether there is room. Measured on a 50-job
+	// burst against MaxParallelism=16: 22 pods ran concurrently even after
+	// admission counting was made uncached, because the admit side never
+	// consulted the limit at all.
+	if r.MaxParallelism > 0 {
+		active, err := r.countActiveJobs(ctx, namespace)
+		if err != nil {
+			return err
+		}
+		if active >= r.MaxParallelism {
+			slog.Debug("Not admitting: at the parallelism limit",
+				"active", active, "limit", r.MaxParallelism)
+			return nil
+		}
+	}
+
 	var jl batchv1.JobList
 	// Uncached for the same reason as countActiveJobs: picking from a stale
 	// list can admit a Job that another reconcile already unsuspended, which

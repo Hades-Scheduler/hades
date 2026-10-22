@@ -8,6 +8,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -108,3 +109,59 @@ func TestCountActiveJobs_IgnoresSuspendedJobs(t *testing.T) {
 type runtimeObject = client.Object
 
 func toObjects(in []runtimeObject) []client.Object { return in }
+
+func TestAdmitOneSuspendedJob_DoesNotExceedTheLimit(t *testing.T) {
+	s := admissionScheme(t)
+	yes := true
+
+	// Already at the limit, with work waiting. Admitting anything here
+	// overshoots; several completion paths call this for the same batch of
+	// finishing Jobs, so "one out, one in" is not a safe assumption.
+	objs := []client.Object{}
+	for i := 0; i < 16; i++ {
+		objs = append(objs, runningJob(fmt.Sprintf("running-%02d", i)))
+	}
+	waiting := runningJob("waiting-0")
+	waiting.Spec.Suspend = &yes
+	objs = append(objs, waiting)
+
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
+	r := &BuildJobReconciler{Client: c, APIReader: c, MaxParallelism: 16}
+
+	if err := r.admitOneSuspendedJob(context.Background(), "hades"); err != nil {
+		t.Fatalf("admitOneSuspendedJob: %v", err)
+	}
+
+	var got batchv1.Job
+	if err := c.Get(context.Background(),
+		types.NamespacedName{Namespace: "hades", Name: "waiting-0"}, &got); err != nil {
+		t.Fatalf("get waiting job: %v", err)
+	}
+	if got.Spec.Suspend == nil || !*got.Spec.Suspend {
+		t.Fatal("waiting-0 was admitted while already at the parallelism limit")
+	}
+}
+
+func TestAdmitOneSuspendedJob_AdmitsWhenThereIsRoom(t *testing.T) {
+	s := admissionScheme(t)
+	yes := true
+	waiting := runningJob("waiting-0")
+	waiting.Spec.Suspend = &yes
+
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(runningJob("running-0"), waiting).Build()
+	r := &BuildJobReconciler{Client: c, APIReader: c, MaxParallelism: 16}
+
+	if err := r.admitOneSuspendedJob(context.Background(), "hades"); err != nil {
+		t.Fatalf("admitOneSuspendedJob: %v", err)
+	}
+
+	var got batchv1.Job
+	if err := c.Get(context.Background(),
+		types.NamespacedName{Namespace: "hades", Name: "waiting-0"}, &got); err != nil {
+		t.Fatalf("get waiting job: %v", err)
+	}
+	if got.Spec.Suspend != nil && *got.Spec.Suspend {
+		t.Fatal("waiting-0 was not admitted although the limit allowed it")
+	}
+}

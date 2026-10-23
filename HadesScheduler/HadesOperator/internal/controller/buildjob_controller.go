@@ -128,9 +128,11 @@ const phasePending = "Pending"
 type BuildJobReconciler struct {
 	client.Client
 	// APIReader reads straight from the API server (mgr.GetAPIReader()). It is
-	// used where acting on a stale cached BuildJob would publish something twice:
-	// container log streams and the job status transitions. Nil falls back to
-	// Client, which is what the unit tests' fake client provides anyway.
+	// used where acting on a stale cached BuildJob would publish something twice
+	// (container log streams and the job status transitions) and for admission
+	// counting, where a stale cache let the limit stop binding under a burst
+	// (measured at 59 concurrent Jobs against MaxParallelism=16). Nil falls back
+	// to Client, which is what the unit tests' fake client provides anyway.
 	APIReader        client.Reader
 	Scheme           *runtime.Scheme
 	K8sClient        kubernetes.Interface
@@ -168,8 +170,9 @@ type BuildJobReconciler struct {
 // admissionTracker serializes MaxParallelism decisions across concurrent
 // reconciles. Counting active Jobs and then creating or unsuspending one is a
 // check-then-act on the informer cache: two workers could both see a free slot,
-// and even one worker sees its own earlier admission only once the watch event
-// lands. mu closes the first gap and pending the second.
+// and a reader that lags behind the API server (the cache, which is what the
+// APIReader fallback gives) shows a worker its own earlier admission only once
+// the watch event lands. mu closes the first gap and pending the second.
 type admissionTracker struct {
 	mu sync.Mutex
 	// pending holds Jobs (namespace/name) admitted by this process that the
@@ -1072,12 +1075,14 @@ func jobCompletionTime(k8sJob *batchv1.Job) time.Time {
 	return latest
 }
 
-// listManagedJobs lists the operator's Jobs in namespace from the cache. The
-// items are the cache's own objects (no deep copy, since this runs on every
-// admission pass over every Job), so callers must copy before mutating.
+// listManagedJobs lists the operator's Jobs in namespace for admission. It reads
+// uncached: the pending tracker only covers this process's own admissions, so a
+// cache that has not caught up with everything else would still undercount.
+// When it does fall back to the cache, the items are the cache's own objects
+// (no deep copy), so callers must copy before mutating.
 func (r *BuildJobReconciler) listManagedJobs(ctx context.Context, namespace string) ([]batchv1.Job, error) {
 	var jl batchv1.JobList
-	if err := r.List(ctx, &jl,
+	if err := r.apiReader().List(ctx, &jl,
 		client.InNamespace(namespace),
 		client.MatchingLabels{LabelManagedBy: ManagedByValue},
 		client.UnsafeDisableDeepCopy,

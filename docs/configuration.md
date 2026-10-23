@@ -10,7 +10,7 @@ Each table is derived directly from the `Config` structs in the code, cited per 
 
 | Variable | Default | Description | Source |
 | -------- | ------- | ----------- | ------ |
-| `DEBUG` | `false` | Set to `true` for verbose (debug-level) logging. Read by every binary. | `shared/utils/logging.go` |
+| `DEBUG` | `false` | Set to `true` for verbose (debug-level) logging. Read by every binary. Debug logs include each step's full definition, its environment (`metadata`) and script, which often hold credentials; keep it off in production. | `shared/utils/logging.go` |
 
 ## NATS connection (all components)
 

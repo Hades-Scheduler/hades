@@ -59,7 +59,7 @@ func (d Job) execute(ctx context.Context) error {
 	}()
 
 	for _, step := range d.Steps {
-		d.logger.Info("Executing step", slog.Any("step", step))
+		logStep(d.logger, "Executing step", step)
 
 		// Copy the global envs and add the step specific ones
 		var envs = make(map[string]string)
@@ -90,7 +90,7 @@ func (d Job) execute(ctx context.Context) error {
 				return ctx.Err()
 			}
 			if step.ContinueOnError {
-				d.logger.Info("Next step should be executed despite error due to ContinueOnError setting", slog.Any("step", step))
+				logStep(d.logger, "Next step should be executed despite error due to ContinueOnError setting", step)
 				stepErr = errors.Join(stepErr, fmt.Errorf("step %v failed with ContinueOnError set: %w", step.ID, err))
 				continue
 			}
@@ -102,4 +102,12 @@ func (d Job) execute(ctx context.Context) error {
 		d.logger.Warn("Job completed with tolerated step failures", slog.Any("error", stepErr))
 	}
 	return nil
+}
+
+// logStep identifies a step at Info level and logs the full step only at Debug.
+// Step metadata becomes the container environment and often carries tokens and
+// API keys, and the script can embed them too, so neither belongs in Info logs.
+func logStep(logger *slog.Logger, msg string, step payload.Step) {
+	logger.Info(msg, slog.Int("step_id", step.ID), slog.String("step_name", step.Name), slog.String("image", step.Image))
+	logger.Debug(msg, slog.Any("step", step))
 }

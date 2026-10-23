@@ -438,8 +438,31 @@ func TestTerminalWithLiveWatcherDoesNotReplay(t *testing.T) {
 
 	events := agg.snapshot()
 	require.Equal(t, 1, count(events, "add:job"), "logs are read once, by the live watcher")
-	require.NotContains(t, events, "reset:job")
+	// The only reset is the watcher's own, before it reads; a replay would add a
+	// second one after the drain.
+	require.Equal(t, 1, count(events, "reset:job"))
+	require.Less(t, slices.Index(events, "reset:job"), slices.Index(events, "add:job"))
 	require.Equal(t, 1, count(events, "sent:job"))
+}
+
+// A Running for an already forwarded job (a redelivery) re-reads the subject
+// from the start, so the previous run's aggregated logs must be dropped first.
+func TestRunningAfterTerminalResetsLogs(t *testing.T) {
+	agg := newRecordingAggregator()
+	dlm := newTestDLM(agg, &fakeLogConsumer{}, nil, time.Hour)
+	ctx := context.Background()
+
+	dlm.handleJobRunning(ctx, "job")
+	dlm.handleJobSucceeded(ctx, "job")
+	dlm.sendWG.Wait()
+
+	dlm.handleJobRunning(ctx, "job")
+	dlm.handleJobSucceeded(ctx, "job")
+	dlm.sendWG.Wait()
+
+	events := agg.snapshot()
+	require.Equal(t, 2, count(events, "reset:job"))
+	require.Equal(t, 2, count(events, "sent:job"))
 }
 
 // The lifetime timer of a replaced watcher must not stop its replacement.

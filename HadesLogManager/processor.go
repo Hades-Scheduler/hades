@@ -245,9 +245,12 @@ func (la *NATSLogAggregator) FlushJob(jobID string) error {
 }
 
 // ResetJobLogs drops the aggregated logs of jobID ahead of a watcher that
-// re-reads the job's log subject from the start.
+// re-reads the job's log subject from the start. It also clears the completion
+// mark, since a job that is watched again is running and the retention sweep
+// would otherwise flush it mid-run.
 func (la *NATSLogAggregator) ResetJobLogs(jobID string) {
 	la.logs.Delete(jobID)
+	la.completed.Delete(jobID)
 }
 
 // MarkJobCompleted marks a job as completed and schedules it for cleanup after retention period.

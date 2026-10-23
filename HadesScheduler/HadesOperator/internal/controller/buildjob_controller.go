@@ -325,7 +325,9 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var bj buildv1.BuildJob
 	if err := r.Get(ctx, req.NamespacedName, &bj); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Object has been deleted; ignore it
+			// Finished log streams stay registered until stopJob. If the BuildJob
+			// was deleted before we finalized it, nobody else will clean them up.
+			r.logStreams().stopJob(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err

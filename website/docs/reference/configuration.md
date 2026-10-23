@@ -104,6 +104,7 @@ Only deployed when the scheduler runs in `operator` mode.
 | `REQUEUE_DELAY` | `15s` | Safety resync for a running `BuildJob` (Go duration). Pod, Job and log-stream events drive progress; this only catches a missed event. A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. |
 | `LOG_DRAIN_TIMEOUT` | `45s` | How long a completed `BuildJob` is kept while its container logs drain, before it is deleted anyway (Go duration). A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. |
 | `FINALIZER_IMAGE` | `busybox:1.37.0` | Image for the main container of every `BuildJob` pod; it only runs `sh -c "echo build finished"`. Override for clusters without Docker Hub access. Keep it pinned - an untagged image means `:latest`, which Kubernetes forces to `imagePullPolicy: Always`. |
+| `K8S_IMAGE_PULL_POLICY` | | `imagePullPolicy` for build step containers: `always`, `if-not-present` or `never`. Empty leaves the Kubernetes default. Invalid values fail operator startup. |
 | `DEV_MODE` | `false` | Enable the controller-runtime development logger. |
 
 The operator also accepts standard controller-runtime flags: `--health-probe-bind-address` (default `:8083`), `--metrics-bind-address` (default `:8082`, set `0` to disable), `--leader-elect`, and the log flags.

@@ -315,8 +315,11 @@ func (dlm *DynamicLogManager) startWatchingJobLogs(ctx context.Context, jobID st
 		if exists {
 			oldWatcher.cancel()
 			oldWatcher.wg.Wait()
-			dlm.resetJobLogs(jobID)
 		}
+		// Reset even when there was no old watcher. On a redelivery the Running
+		// can arrive after the previous run's terminal status was handled, so
+		// that run's logs are still aggregated and we're about to read them again.
+		dlm.resetJobLogs(jobID)
 
 		slog.Info("Starting to watch job logs", "job_id", jobID)
 		err := dlm.logConsumer.WatchJobLogs(jobCtx, jobID, drain, func(batchedLog logs.Log) {

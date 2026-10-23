@@ -127,14 +127,16 @@ hadesOperator:
   DeleteOnComplete: false
   # -- Maximum number of Jobs the operator admits concurrently; excess are suspended.
   maxParallelism: "100"
-  # -- How often the operator re-reconciles a BuildJob whose Job is still running
-  # (Go duration). The operator watches BuildJobs and the Jobs it owns but not
-  # Pods, so container transitions and job completion are only observed on these
-  # requeues: completion is detected up to this long after it happens. Lower it
-  # for faster completion signalling (or for latency measurements) at the cost of
-  # more API-server traffic. A zero or negative duration falls back to the
-  # default; a value that is not a valid Go duration fails operator startup.
-  requeueDelay: "2s"
+  # -- Safety resync for a BuildJob whose Job is still running (Go duration). The
+  # operator reacts to pod, Job and log-stream events, so completion is detected
+  # as it happens; this only bounds how late it notices something those events
+  # missed (e.g. pods of Jobs created by an older operator version, or a log
+  # stream that has to be restarted). A zero or negative duration falls back to
+  # the default; a value that is not a valid Go duration fails operator startup.
+  requeueDelay: "15s"
+  # -- Number of BuildJobs the operator reconciles in parallel. A zero or
+  # negative value falls back to the default.
+  maxConcurrentReconciles: "8"
   # -- How long a completed BuildJob is kept (undeleted) while its container logs
   # are still being published, before it is deleted anyway (Go duration).
   # Kubernetes only serves container logs while the pod exists, so this is the

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -22,10 +23,24 @@ const (
 	// defaultBatchTimeout bounds how long the consumer buffers streamed entries
 	// before flushing them to the aggregator. Kept short so the snapshot API
 	// reflects live logs promptly; the dashboard SSE path bypasses this timer.
-	defaultBatchTimeout  = 1 * time.Second
-	defaultFetchSize     = 10
-	defaultFetchWaitTime = 100 * time.Millisecond
-	defaultShutdownTime  = 5 * time.Second
+	defaultBatchTimeout = 1 * time.Second
+	// defaultPullMaxMessages is how many messages the ordered consumer keeps
+	// buffered client-side. A deep buffer lets a drain after a chatty job read
+	// its backlog in a few large pulls rather than many small ones.
+	defaultPullMaxMessages = 500
+	// defaultIteratorRetry is the backoff after an iterator error the ordered
+	// consumer could not recover from on its own (e.g. a disconnect).
+	defaultIteratorRetry = 500 * time.Millisecond
+	// consumerInactiveThreshold is how long the server keeps a per-job consumer
+	// nobody is pulling from. The library default of 5 minutes would leave every
+	// finished job's consumer around that long.
+	consumerInactiveThreshold = 30 * time.Second
+	// consumerPullExpiry must stay well below consumerInactiveThreshold, see
+	// openIterator.
+	consumerPullExpiry = 10 * time.Second
+	// defaultDrainQuietPeriod ends a drain whose target sequence is unknown once
+	// no message has arrived for this long.
+	defaultDrainQuietPeriod = 2 * time.Second
 	// defaultDrainTimeout bounds the graceful drain so a stuck consumer can
 	// never make WatchJobLogs hang; on timeout we flush what we have and return.
 	defaultDrainTimeout = 30 * time.Second
@@ -71,6 +86,9 @@ type HadesLogProducer struct {
 type HadesLogConsumer struct {
 	natsConnection *nats.Conn
 	js             jetstream.JetStream
+
+	streamMu sync.Mutex
+	stream   jetstream.Stream
 }
 
 // NewHadesLogProducer creates a new log producer with JetStream stream setup.
@@ -168,18 +186,18 @@ func (hlp *HadesLogProducer) PublishJobLog(ctx context.Context, buildJobLog Log)
 }
 
 // WatchJobLogs subscribes to logs for a specific job and calls the handler for each batch.
-// It creates a job-specific durable consumer and automatically batches log entries for efficiency.
+// It reads through an ephemeral ordered consumer and batches log entries per container.
 //
 // There are two ways to stop watching:
-//   - Closing drain requests a graceful stop: the consumer keeps fetching until it is
-//     caught up to the stream (NumPending == 0) or a bounded timeout elapses, so every
-//     already-published batch is delivered to the handler before returning. Job logs are
-//     published to JetStream before the job's terminal status is announced, so a graceful
-//     drain guarantees the in-memory aggregation is complete.
-//   - Cancelling ctx is a hard stop for service shutdown: remaining fetched logs are
+//   - Closing drain requests a graceful stop: the watcher keeps reading until it has seen
+//     the last message stored for the job's subject at the moment the drain started (or a
+//     bounded timeout elapses), so every already-published batch is delivered to the
+//     handler before returning. Job logs are published to JetStream before the job's
+//     terminal status is announced, so a graceful drain guarantees the in-memory
+//     aggregation is complete.
+//   - Cancelling ctx is a hard stop for service shutdown: remaining received logs are
 //     flushed and the method returns immediately without waiting to catch up.
 //
-// The consumer is automatically cleaned up when the method returns.
 // Returns an error if the job ID is invalid or consumer creation fails.
 func (hlc *HadesLogConsumer) WatchJobLogs(ctx context.Context, jobID string, drain <-chan struct{}, handler func(Log)) error {
 	if jobID == "" {
@@ -191,44 +209,133 @@ func (hlc *HadesLogConsumer) WatchJobLogs(ctx context.Context, jobID string, dra
 	}
 
 	subject := fmt.Sprintf(NatsLogSubject, jobID)
-	consumerName := fmt.Sprintf("job-watcher-%s", jobID)
-
-	consumerConfig := jetstream.ConsumerConfig{
-		Name:          consumerName,
-		Durable:       consumerName,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		FilterSubject: subject,
-		DeliverPolicy: jetstream.DeliverAllPolicy,
+	open := func(ctx context.Context, startSeq uint64) (jetstream.MessagesContext, error) {
+		return hlc.openIterator(ctx, subject, startSeq)
 	}
 
-	consumer, err := hlc.js.CreateOrUpdateConsumer(ctx, StreamName, consumerConfig)
+	// Open the first iterator here so a consumer that cannot be created at all is
+	// reported to the caller instead of being retried in the background.
+	iter, err := open(ctx, 0)
 	if err != nil {
 		return fmt.Errorf("creating consumer for job %s: %w", jobID, err)
 	}
 
-	// Cleanup consumer when done
-	defer func() {
-		deleteCtx, cancel := context.WithTimeout(context.Background(), defaultShutdownTime)
-		defer cancel()
+	slog.Info("Started watching job logs", "job_id", jobID, "subject", subject)
 
-		if err := hlc.js.DeleteConsumer(deleteCtx, StreamName, consumerName); err != nil {
-			slog.Warn("Failed to delete job consumer",
-				"job_id", jobID,
-				"consumer", consumerName,
-				"error", err)
-		} else {
-			slog.Debug("Deleted job consumer",
-				"job_id", jobID,
-				"consumer", consumerName)
-		}
+	msgs := make(chan streamMsg)
+	srcCtx, stop := context.WithCancel(context.Background())
+	readerDone := make(chan struct{})
+	go readMessages(srcCtx, iter, open, jobID, msgs, readerDone)
+	defer func() {
+		stop()
+		<-readerDone
 	}()
 
-	slog.Info("Started watching job logs",
-		"job_id", jobID,
-		"subject", subject,
-		"consumer", consumerName)
+	return hlc.processBatchedLogs(ctx, subject, jobID, msgs, drain, handler)
+}
 
-	return hlc.processBatchedLogs(ctx, consumer, jobID, drain, handler)
+// openIterator creates an ordered consumer on subject and starts iterating it,
+// from startSeq when non-zero and from the beginning otherwise.
+func (hlc *HadesLogConsumer) openIterator(ctx context.Context, subject string, startSeq uint64) (jetstream.MessagesContext, error) {
+	// An ordered consumer is ephemeral, unacked and server-side flow controlled:
+	// the server pushes new messages into a client buffer instead of the watcher
+	// polling, and there is no durable state to create or delete per job. The
+	// server reaps it after InactiveThreshold, so returning does not wait on a
+	// DeleteConsumer round-trip before the log callback can go out.
+	cfg := jetstream.OrderedConsumerConfig{
+		FilterSubjects:    []string{subject},
+		DeliverPolicy:     jetstream.DeliverAllPolicy,
+		InactiveThreshold: consumerInactiveThreshold,
+	}
+	if startSeq > 0 {
+		cfg.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+		cfg.OptStartSeq = startSeq
+	}
+	consumer, err := hlc.js.OrderedConsumer(ctx, StreamName, cfg)
+	if err != nil {
+		return nil, err
+	}
+	// Pull requests expire well inside InactiveThreshold, so a watcher that is
+	// merely idle keeps renewing them and its consumer is never reaped under it.
+	return consumer.Messages(
+		jetstream.PullMaxMessages(defaultPullMaxMessages),
+		jetstream.PullExpiry(consumerPullExpiry),
+	)
+}
+
+// iteratorOpener opens a message iterator starting at startSeq (0 = beginning).
+type iteratorOpener func(ctx context.Context, startSeq uint64) (jetstream.MessagesContext, error)
+
+// streamMsg is a log message with its stream sequence, parsed once by
+// readMessages (which needs it to reopen) rather than again by the consumer.
+type streamMsg struct {
+	msg jetstream.Msg
+	seq uint64
+}
+
+// readMessages pumps iterators into msgs until ctx is cancelled. It exists so the
+// batching loop can select on new messages alongside its timer, drain and
+// cancellation signals; Next itself only blocks.
+//
+// The ordered consumer recreates itself on heartbeat and sequence gaps, but it
+// closes the iterator for good when that recreation fails (e.g. the connection
+// was closed meanwhile). Rather than leaving the batching loop waiting for
+// messages that never come, which would turn a drain into a full timeout and a
+// partial log, the reader reopens from just after the last forwarded message.
+func readMessages(ctx context.Context, iter jetstream.MessagesContext, open iteratorOpener, jobID string, msgs chan<- streamMsg, done chan<- struct{}) {
+	defer close(done)
+	var lastSeq uint64
+	backoff := func() bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(defaultIteratorRetry):
+			return true
+		}
+	}
+
+	for {
+		msg, err := iter.Next(jetstream.NextContext(ctx))
+		switch {
+		case ctx.Err() != nil:
+			iter.Stop()
+			return
+		case errors.Is(err, jetstream.ErrMsgIteratorClosed):
+			slog.Warn("Log iterator closed unexpectedly; reopening", "job_id", jobID, "after_seq", lastSeq)
+			iter.Stop()
+			for {
+				if !backoff() {
+					return
+				}
+				next, err := open(ctx, lastSeq+1)
+				if err == nil {
+					iter = next
+					break
+				}
+				slog.Warn("Failed to reopen log iterator", "job_id", jobID, "error", err)
+			}
+			continue
+		case err != nil:
+			// Transient (e.g. a timeout while disconnected); back off instead of
+			// spinning.
+			slog.Debug("Log iterator error", "job_id", jobID, "error", err)
+			if !backoff() {
+				iter.Stop()
+				return
+			}
+			continue
+		}
+
+		if meta, err := msg.Metadata(); err == nil {
+			lastSeq = meta.Sequence.Stream
+		}
+		select {
+		case msgs <- streamMsg{msg: msg, seq: lastSeq}:
+		case <-ctx.Done():
+			iter.Stop()
+			return
+		}
+	}
 }
 
 // containerLogBatcher accumulates log entries per container so that the
@@ -292,8 +399,9 @@ func (b *containerLogBatcher) drain() []Log {
 // per-step grouping) and calls the handler once per container on each flush.
 //
 // It returns when ctx is cancelled (hard stop: flush and return ctx.Err()) or when drain
-// is closed (graceful stop: drain the consumer to caught-up, then flush and return nil).
-func (hlc *HadesLogConsumer) processBatchedLogs(ctx context.Context, consumer jetstream.Consumer, jobID string, drain <-chan struct{}, handler func(Log)) error {
+// is closed (graceful stop: read up to the subject's last stored message, then flush and
+// return nil).
+func (hlc *HadesLogConsumer) processBatchedLogs(ctx context.Context, subject, jobID string, msgs <-chan streamMsg, drain <-chan struct{}, handler func(Log)) error {
 	batcher := newContainerLogBatcher(jobID)
 	batchTimer := time.NewTimer(defaultBatchTimeout)
 	defer batchTimer.Stop()
@@ -305,51 +413,23 @@ func (hlc *HadesLogConsumer) processBatchedLogs(ctx context.Context, consumer je
 		batchTimer.Reset(defaultBatchTimeout)
 	}
 
-	// fetchOnce pulls up to defaultFetchSize messages, batching and acking each,
-	// flushing when the batch grows large. It returns true if any message was
-	// received. It is shared by the steady-state loop and the drain loop so both
-	// consume from the same durable position, guaranteeing no message is read or
-	// aggregated twice. After an empty fetch it backs off until stop closes. The
-	// drain loop passes nil because drain is already closed there and the backoff
-	// would turn into a busy loop.
-	fetchOnce := func(stop <-chan struct{}) bool {
-		batch, err := consumer.FetchNoWait(defaultFetchSize)
-		if err != nil {
-			waitIdle(ctx, stop, defaultFetchWaitTime)
-			return false
+	// lastSeq is the stream sequence of the newest message processed so far. The
+	// drain compares it against the subject's last stored sequence.
+	var lastSeq uint64
+	process := func(m streamMsg) {
+		lastSeq = m.seq
+
+		var log Log
+		if err := json.Unmarshal(m.msg.Data(), &log); err != nil {
+			// Nothing is acked on an ordered consumer, so skipping is final: a
+			// malformed message cannot be redelivered in a loop.
+			slog.Warn("Skipping malformed log message", "job_id", jobID, "error", err)
+			return
 		}
-
-		hasMessages := false
-		for msg := range batch.Messages() {
-			hasMessages = true
-
-			var log Log
-			if err := json.Unmarshal(msg.Data(), &log); err != nil {
-				slog.Warn("Failed to unmarshal log message",
-					"job_id", jobID,
-					"error", err)
-				if ackErr := msg.Nak(); ackErr != nil {
-					slog.Warn("Failed to NAK message", "error", ackErr)
-				}
-				continue
-			}
-
-			batcher.add(log)
-
-			if ackErr := msg.Ack(); ackErr != nil {
-				slog.Warn("Failed to ACK message", "error", ackErr)
-			}
-
-			// Flush batch if it gets too large
-			if batcher.size() >= defaultBatchSize {
-				flushBatch()
-			}
+		batcher.add(log)
+		if batcher.size() >= defaultBatchSize {
+			flushBatch()
 		}
-
-		if !hasMessages {
-			waitIdle(ctx, stop, defaultFetchWaitTime)
-		}
-		return hasMessages
 	}
 
 	for {
@@ -361,66 +441,112 @@ func (hlc *HadesLogConsumer) processBatchedLogs(ctx context.Context, consumer je
 		default:
 		}
 
-		// Graceful stop: drain the consumer to caught-up before returning so the
-		// in-memory aggregation is complete. Checked before the fetch below so a
-		// closed drain channel is taken promptly instead of racing the default case.
 		select {
+		case <-ctx.Done():
+			flushBatch()
+			return ctx.Err()
 		case <-drain:
-			return hlc.drainToCaughtUp(ctx, consumer, jobID, fetchOnce, flushBatch)
-		default:
-		}
-
-		select {
+			return hlc.drainToCaughtUp(ctx, subject, jobID, msgs, &lastSeq, process, flushBatch)
 		case <-batchTimer.C:
 			flushBatch()
-		default:
-			fetchOnce(drain)
+		case msg := <-msgs:
+			process(msg)
 		}
 	}
 }
 
-// drainToCaughtUp keeps fetching from the durable consumer until it is caught up to
-// the stream (ConsumerInfo.NumPending == 0), then flushes and returns. Because job
-// logs are published to JetStream before the terminal status is announced, everything
-// for the job is already in the stream by the time a drain is requested, so reaching
-// NumPending == 0 means every batch has been delivered and aggregated. The drain is
-// bounded by defaultDrainTimeout so it can never hang; on timeout it flushes whatever
-// it has and returns. It reuses the same consumer position as the steady-state loop,
-// so no message is re-read or duplicated.
-func (hlc *HadesLogConsumer) drainToCaughtUp(ctx context.Context, consumer jetstream.Consumer, jobID string, fetchOnce func(stop <-chan struct{}) bool, flushBatch func()) error {
+// drainToCaughtUp reads until the watcher has processed the last message stored for
+// the job's subject when the drain started, then flushes and returns. Because job logs
+// are published to JetStream before the terminal status is announced, everything for
+// the job is already in the stream by then, so reaching that sequence means every
+// batch has been delivered and aggregated. The target is taken once instead of polling
+// consumer info: messages already buffered client-side count as delivered there, which
+// would end the drain before they were processed. The drain is bounded by
+// defaultDrainTimeout so it can never hang; on timeout it flushes whatever it has.
+func (hlc *HadesLogConsumer) drainToCaughtUp(ctx context.Context, subject, jobID string, msgs <-chan streamMsg, lastSeq *uint64, process func(streamMsg), flushBatch func()) error {
 	slog.Info("Draining remaining job logs before stopping", "job_id", jobID)
 
 	drainCtx, cancel := context.WithTimeout(ctx, defaultDrainTimeout)
 	defer cancel()
 
-	for {
-		info, err := consumer.Info(drainCtx)
-		if err != nil {
-			slog.Warn("Failed to read consumer info during drain",
-				"job_id", jobID, "error", err)
-		} else if info.NumPending == 0 {
-			flushBatch()
-			slog.Info("Drained job logs to caught-up", "job_id", jobID)
-			return nil
-		}
+	target, err := hlc.lastSubjectSeq(drainCtx, subject)
+	switch {
+	case errors.Is(err, jetstream.ErrMsgNotFound):
+		// Nothing was ever stored for this job (or it all aged out).
+		flushBatch()
+		return nil
+	case err != nil:
+		// Without a target we cannot know when we are caught up; keep reading
+		// until the stream goes quiet for a moment instead of dropping logs.
+		slog.Warn("Failed to read last log sequence during drain",
+			"job_id", jobID, "error", err)
+		return hlc.drainUntilQuiet(drainCtx, jobID, msgs, process, flushBatch)
+	}
 
-		if drainCtx.Err() != nil {
+	for *lastSeq < target {
+		select {
+		case msg := <-msgs:
+			process(msg)
+		case <-drainCtx.Done():
 			flushBatch()
 			slog.Warn("Drain timed out; flushing partial logs",
 				"job_id", jobID, "error", drainCtx.Err())
 			return nil
 		}
+	}
 
-		fetchOnce(nil)
+	flushBatch()
+	slog.Info("Drained job logs to caught-up", "job_id", jobID)
+	return nil
+}
+
+// drainUntilQuiet is the fallback drain when the target sequence is unknown: it reads
+// until no message arrives for defaultDrainQuietPeriod or drainCtx ends.
+func (hlc *HadesLogConsumer) drainUntilQuiet(drainCtx context.Context, jobID string, msgs <-chan streamMsg, process func(streamMsg), flushBatch func()) error {
+	quiet := time.NewTimer(defaultDrainQuietPeriod)
+	defer quiet.Stop()
+	for {
+		select {
+		case msg := <-msgs:
+			process(msg)
+			quiet.Reset(defaultDrainQuietPeriod)
+		case <-quiet.C:
+			flushBatch()
+			return nil
+		case <-drainCtx.Done():
+			flushBatch()
+			slog.Warn("Drain timed out; flushing partial logs",
+				"job_id", jobID, "error", drainCtx.Err())
+			return nil
+		}
 	}
 }
 
-// waitIdle backs off for d between empty fetches, but wakes early when stop is closed
-// or ctx is cancelled so a stop request is not delayed by the remaining backoff.
-func waitIdle(ctx context.Context, stop <-chan struct{}, d time.Duration) {
-	select {
-	case <-time.After(d):
-	case <-stop:
-	case <-ctx.Done():
+// lastSubjectSeq returns the stream sequence of the newest message stored on subject.
+func (hlc *HadesLogConsumer) lastSubjectSeq(ctx context.Context, subject string) (uint64, error) {
+	stream, err := hlc.logStream(ctx)
+	if err != nil {
+		return 0, err
 	}
+	msg, err := stream.GetLastMsgForSubject(ctx, subject)
+	if err != nil {
+		return 0, err
+	}
+	return msg.Sequence, nil
+}
+
+// logStream returns a cached handle on the log stream, binding it on first use. The
+// handle is only used for direct gets, which do not depend on the cached stream info.
+func (hlc *HadesLogConsumer) logStream(ctx context.Context) (jetstream.Stream, error) {
+	hlc.streamMu.Lock()
+	defer hlc.streamMu.Unlock()
+	if hlc.stream != nil {
+		return hlc.stream, nil
+	}
+	stream, err := hlc.js.Stream(ctx, StreamName)
+	if err != nil {
+		return nil, fmt.Errorf("binding stream %s: %w", StreamName, err)
+	}
+	hlc.stream = stream
+	return stream, nil
 }

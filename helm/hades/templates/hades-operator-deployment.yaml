@@ -46,9 +46,8 @@ spec:
               value: {{ .Values.debug | quote }}
             - name: NATS_URL
               value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
-            # Reconcile tuning is independent of the watch scope, so unlike
-            # WATCH_NAMESPACE below these are injected in both namespaced and
-            # cluster-wide mode.
+            # Everything except WATCH_NAMESPACE is independent of the watch
+            # scope, so it is injected in both namespaced and cluster-wide mode.
             - name: REQUEUE_DELAY
               value: {{ .Values.hadesOperator.requeueDelay | quote }}
             - name: LOG_DRAIN_TIMEOUT
@@ -57,13 +56,15 @@ spec:
               value: {{ .Values.hadesOperator.finalizerImage | quote }}
             - name: K8S_IMAGE_PULL_POLICY
               value: {{ .Values.hadesOperator.imagePullPolicy | quote }}
-            {{- if not .Values.hadesOperator.clusterWide }}
-            - name: WATCH_NAMESPACE
-              value: {{ default .Release.Namespace .Values.hadesOperator.targetNamespace | quote }}
+            - name: MAX_CONCURRENT_RECONCILES
+              value: {{ .Values.hadesOperator.maxConcurrentReconciles | quote }}
             - name: DELETE_ON_COMPLETE
               value: {{ .Values.hadesOperator.DeleteOnComplete | quote }}
             - name: MAX_PARALLELISM
               value: {{ .Values.hadesOperator.maxParallelism | quote }}
+            {{- if not .Values.hadesOperator.clusterWide }}
+            - name: WATCH_NAMESPACE
+              value: {{ default .Release.Namespace .Values.hadesOperator.targetNamespace | quote }}
             {{- end }}
             {{- include "hades.tracingEnv" . | nindent 12 }}
 

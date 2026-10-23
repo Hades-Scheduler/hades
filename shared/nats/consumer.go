@@ -223,9 +223,7 @@ func NewHadesConsumer(nc *nats.Conn, cfg ConsumerConfig) (*HadesNATSConsumer, er
 			"ack_wait", cfg.AckWait, "max_deliver", cfg.MaxDeliver)
 	}
 
-	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket: "HADES_JOBS",
-	})
+	kv, err := js.CreateOrUpdateKeyValue(ctx, JobsKVConfig())
 	if err != nil {
 		slog.Error("Failed to create JetStream KeyValue store", "error", err)
 		return nil, err

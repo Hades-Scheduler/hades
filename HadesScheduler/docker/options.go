@@ -2,6 +2,7 @@ package docker
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/hades-scheduler/hades/shared/buildlogs"
 	"github.com/hades-scheduler/hades/shared/buildstatus"
@@ -93,6 +94,18 @@ func WithImagePullPolicy(policy string) DockerOption {
 			return err
 		}
 		s.imagePullPolicy = p
+		return nil
+	}
+}
+
+// WithImagePullFreshness sets how long a successful pull lets later jobs skip
+// the registry for the same, locally present image. Zero disables it.
+func WithImagePullFreshness(window time.Duration) DockerOption {
+	return func(s *Scheduler) error {
+		if window < 0 {
+			return fmt.Errorf("image pull freshness must not be negative, got %s", window)
+		}
+		s.imagePullFreshness = window
 		return nil
 	}
 }

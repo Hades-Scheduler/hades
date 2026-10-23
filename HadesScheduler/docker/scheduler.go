@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/hades-scheduler/hades/hadesScheduler/log"
@@ -33,6 +34,7 @@ type Options struct {
 	volumeName           string
 	containerLogsOptions container.LogConfig
 	imagePullPolicy      PullPolicy
+	imagePullFreshness   time.Duration
 }
 
 // Scheduler runs jobs on the local Docker daemon and publishes their logs and
@@ -42,6 +44,7 @@ type Scheduler struct {
 	cli             *client.Client
 	logPublisher    buildlogs.LogPublisher
 	statusPublisher buildstatus.StatusPublisher
+	pulls           *pullCoalescer
 }
 
 // NewScheduler builds a Scheduler from the default configuration and applies the
@@ -58,6 +61,7 @@ func NewScheduler(options ...DockerOption) (*Scheduler, error) {
 			return nil, err
 		}
 	}
+	scheduler.pulls = newPullCoalescer(scheduler.imagePullFreshness)
 
 	return scheduler, nil
 }
@@ -89,6 +93,7 @@ func NewDefaultScheduler() (*Scheduler, error) {
 		Options:         defaultOpts,
 		logPublisher:    log.NewNoopPublisher(), // Use no-op publisher by default
 		statusPublisher: log.NewNoopPublisher(), // Use no-op publisher by default
+		pulls:           newPullCoalescer(0),
 	}
 
 	return scheduler, nil
@@ -136,8 +141,14 @@ func (d *Scheduler) ScheduleJob(ctx context.Context, job payload.QueuePayload) e
 	// its own timeout so cleanup still runs even if the job context (ctx) has
 	// already been cancelled, e.g. during a graceful shutdown - otherwise the
 	// shared-<jobID> volume would leak.
+	//
+	// Step containers are removed in the background (see Step.execute), so
+	// wait for those removals first: the volume cannot go while a container
+	// still references it.
+	var removals sync.WaitGroup
 	defer func() {
 		teardownStart := time.Now()
+		removals.Wait()
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := deleteSharedVolume(cleanupCtx, d.cli, volumeName); err != nil {
@@ -161,6 +172,8 @@ func (d *Scheduler) ScheduleJob(ctx context.Context, job payload.QueuePayload) e
 		QueuePayload: job,
 		publisher:    d.logPublisher,
 		timer:        timer,
+		pulls:        d.pulls,
+		removals:     &removals,
 	}
 
 	//block to send status first before execution

@@ -26,6 +26,7 @@ import (
 
 	hades "github.com/hades-scheduler/hades/shared"
 	"github.com/hades-scheduler/hades/shared/buildstatus"
+	hadesnats "github.com/hades-scheduler/hades/shared/nats"
 	"github.com/hades-scheduler/hades/shared/redact"
 	"github.com/hades-scheduler/hades/shared/utils"
 	"github.com/nats-io/nats.go"
@@ -33,8 +34,6 @@ import (
 )
 
 const (
-	// jobsBucket is the JetStream KV bucket holding full job payloads.
-	jobsBucket = "HADES_JOBS"
 	// jobsStream is the JetStream stream carrying queued job references.
 	jobsStream = "HADES_JOBS"
 	// metricsBroadcastInterval is how often aggregate metrics are pushed to
@@ -114,9 +113,9 @@ func NewServer(ctx context.Context, cfg Config, nc *nats.Conn) (*Server, error) 
 		if err != nil {
 			return nil, fmt.Errorf("creating JetStream context: %w", err)
 		}
-		kv, err = js.KeyValue(ctx, jobsBucket)
+		kv, err = js.KeyValue(ctx, hadesnats.JobsBucket)
 		if err != nil {
-			return nil, fmt.Errorf("opening KV bucket %q: %w", jobsBucket, err)
+			return nil, fmt.Errorf("opening KV bucket %q: %w", hadesnats.JobsBucket, err)
 		}
 	}
 
@@ -190,6 +189,11 @@ func (s *Server) metricsLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Metrics cost three JetStream round-trips and a tracker scan; with
+			// nobody watching they would be computed only to be thrown away.
+			if s.hub.clientCount() == 0 {
+				continue
+			}
 			s.hub.broadcast(event{Type: eventMetrics, Metrics: s.metrics(ctx)})
 		}
 	}

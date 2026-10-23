@@ -30,6 +30,7 @@ type Scheduler struct {
 	dynClient dynamic.Interface
 	namespace string
 	config    K8sConfig
+	gvr       schema.GroupVersionResource
 	publisher log.NATSPublisher
 }
 
@@ -37,6 +38,14 @@ type Scheduler struct {
 type K8sConfig struct {
 	// K8sNamespace is the namespace in which the jobs should be scheduled (default: hades-executor)
 	K8sNamespace string `env:"K8S_NAMESPACE,notEmpty" envDefault:"hades-executor"`
+
+	// ClientQPS and ClientBurst rate-limit the API client that creates BuildJobs.
+	// Left unset, client-go throttles to 5 QPS / burst 10, which turns a burst
+	// of a few hundred submissions into a minute of client-side queueing no
+	// matter how many workers dequeue in parallel. The API server's own
+	// priority and fairness still protects it at these values.
+	ClientQPS   float32 `env:"K8S_CLIENT_QPS" envDefault:"50"`
+	ClientBurst int     `env:"K8S_CLIENT_BURST" envDefault:"100"`
 }
 
 // Annotation keys set on the BuildJob so the operator can reconstruct job
@@ -65,6 +74,15 @@ func NewK8sScheduler(nc *nats.Conn) (*Scheduler, error) {
 	if err := utils.LoadConfig(&k8sCfg); err != nil {
 		return nil, fmt.Errorf("loading Kubernetes config: %w", err)
 	}
+	// client-go quietly replaces 0 with its own defaults (5 QPS / burst 10),
+	// treats a negative QPS as "no rate limit", and fails every request when
+	// burst is negative. Better to refuse these at startup.
+	if k8sCfg.ClientQPS <= 0 {
+		return nil, fmt.Errorf("invalid K8S_CLIENT_QPS %g: must be greater than 0", k8sCfg.ClientQPS)
+	}
+	if k8sCfg.ClientBurst < 1 {
+		return nil, fmt.Errorf("invalid K8S_CLIENT_BURST %d: must be at least 1", k8sCfg.ClientBurst)
+	}
 	slog.Debug("Kubernetes config", "namespace", k8sCfg.K8sNamespace)
 
 	slog.Info("Initializing Kubernetes client")
@@ -72,6 +90,14 @@ func NewK8sScheduler(nc *nats.Conn) (*Scheduler, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Resolved once here rather than per job: every load re-reads .env and,
+	// in containers without one, logs a warning.
+	var gvrCfg BuildJobGVRConfig
+	if err := utils.LoadConfig(&gvrCfg); err != nil {
+		return nil, fmt.Errorf("loading BuildJob GVR config: %w", err)
+	}
+	scheduler.gvr = gvrCfg.ToGVR()
 
 	if nc != nil {
 		publisher, err := log.NewNATSPublisher(nc)
@@ -100,6 +126,9 @@ func initializeOperatorAccess(k8sCfg K8sConfig) (Scheduler, error) {
 			return Scheduler{}, fmt.Errorf("building rest.Config for operator mode: %w", err)
 		}
 	}
+
+	rc.QPS = k8sCfg.ClientQPS
+	rc.Burst = k8sCfg.ClientBurst
 
 	dyn, err := dynamic.NewForConfig(rc)
 	if err != nil {
@@ -134,15 +163,9 @@ func (k Scheduler) createBuildJobCR(ctx context.Context, job payload.QueuePayloa
 		return fmt.Errorf("dynamic client is nil: operator mode not initialized")
 	}
 
-	var gvrCfg BuildJobGVRConfig
-	if err := utils.LoadConfig(&gvrCfg); err != nil {
-		return fmt.Errorf("loading BuildJob GVR config: %w", err)
-	}
-	buildJobGVR := gvrCfg.ToGVR()
-
 	obj := buildBuildJobObject(job, k.namespace)
 
-	_, err := k.dynClient.Resource(buildJobGVR).Namespace(k.namespace).Create(ctx, obj, metav1.CreateOptions{})
+	_, err := k.dynClient.Resource(k.gvr).Namespace(k.namespace).Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			slog.Info("BuildJob already exists (idempotent)", "name", job.ID.String())

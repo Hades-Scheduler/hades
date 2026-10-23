@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hades-scheduler/hades/shared/buildlogs"
@@ -34,6 +35,9 @@ type Step struct {
 	timer     *timing.JobTimer
 	// image is pulled by the job before the steps run (see Job.execute).
 	image *pendingImage
+	// removals tracks background container removals; the job waits on it
+	// before deleting the shared volume.
+	removals *sync.WaitGroup
 }
 
 func (s Step) execute(ctx context.Context) error {
@@ -146,12 +150,36 @@ func (s Step) execute(ctx context.Context) error {
 		if s.Options.containerAutoremove {
 			return
 		}
-		removeStart := time.Now()
-		if err := removeContainer(ctx, s.cli, resp.ID); err != nil {
-			s.logger.Error("Failed to cleanup container", slog.Any("error", err), slog.Any("container_id", resp.ID))
-		}
-		s.timer.Record(s.ID, timing.PhaseContainerRemove, removeStart, time.Now())
+		// The container has exited, so nothing waits on its removal except the
+		// volume teardown. Removing it in the background takes the overlay
+		// unmount off the path to the next step and to the job's final status.
+		s.removals.Go(func() {
+			removeStart := time.Now()
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			if err := removeContainer(cleanupCtx, s.cli, resp.ID); err != nil {
+				s.logger.Error("Failed to cleanup container", slog.Any("error", err), slog.Any("container_id", resp.ID))
+			}
+			s.timer.Record(s.ID, timing.PhaseContainerRemove, removeStart, time.Now())
+		})
 	}()
+
+	// Register the wait before starting the container, as the Docker CLI does.
+	// Waiting after the start races with a fast-exiting container: with
+	// AutoRemove it can be gone before the wait arrives, which fails the step
+	// with "No such container". ContainerWait returns once the daemon has
+	// accepted the request, so the start below cannot overtake it. With
+	// AutoRemove, waiting for removal also means the shared volume is free
+	// once the step returns.
+	waitCondition := container.WaitConditionNextExit
+	if s.Options.containerAutoremove {
+		waitCondition = container.WaitConditionRemoved
+	}
+	waitCtx, cancelWait := context.WithCancel(ctx)
+	defer cancelWait()
+	waitResult := s.cli.ContainerWait(waitCtx, resp.ID, client.ContainerWaitOptions{
+		Condition: waitCondition,
+	})
 
 	// Start the container
 	startupStart := time.Now()
@@ -179,10 +207,6 @@ func (s Step) execute(ctx context.Context) error {
 		}
 	}()
 
-	// Wait for the container to finish
-	waitResult := s.cli.ContainerWait(ctx, resp.ID, client.ContainerWaitOptions{
-		Condition: container.WaitConditionNotRunning,
-	})
 	select {
 	case err := <-waitResult.Error:
 		s.timer.Record(s.ID, timing.PhaseContainerRun, runStart, time.Now())

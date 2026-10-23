@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -35,9 +36,14 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	buildv1 "github.com/hades-scheduler/hades/HadesScheduler/HadesOperator/api/v1"
+	"github.com/hades-scheduler/hades/hadesScheduler/k8s"
 	"github.com/hades-scheduler/hades/hadesScheduler/log"
 	hades "github.com/hades-scheduler/hades/shared"
 	"github.com/hades-scheduler/hades/shared/buildlogs"
@@ -53,11 +59,37 @@ import (
 const conflictRequeueDelay = 200 * time.Millisecond
 const BuildStepPrefix = "step-%d"
 
-// DefaultRequeueDelay is the poll interval used when BuildJobReconciler.RequeueDelay
-// is not set to a positive value. The operator watches BuildJobs and the Jobs it
-// owns but not Pods, so container transitions and job completion are only observed
-// on these periodic requeues: this value bounds how late a completion is noticed.
-const DefaultRequeueDelay = 2 * time.Second
+// DefaultRequeueDelay is the safety resync interval used when
+// BuildJobReconciler.RequeueDelay is not set to a positive value. Progress is
+// driven by watch events (the BuildJob, its Job, its pod, and finished log
+// streams), so this only bounds how late the operator notices something those
+// events missed: a pod created before pods carried LabelBuildJob, a log stream
+// that failed and needs restarting, or a suspended Job whose admission was
+// missed.
+const DefaultRequeueDelay = 15 * time.Second
+
+// podPendingRequeueDelay is how soon a BuildJob whose unsuspended Job has no pod
+// yet is looked at again. The pod's creation event normally gets there first;
+// this covers a pod the informer cache has not seen yet.
+const podPendingRequeueDelay = 1 * time.Second
+
+// DefaultMaxConcurrentReconciles is used when
+// BuildJobReconciler.MaxConcurrentReconciles is not positive. Reconciles spend
+// most of their time waiting on the API server and NATS, so a single worker
+// would queue every running job's status updates behind each other.
+const DefaultMaxConcurrentReconciles = 8
+
+// admissionCacheGrace bounds how long an admission the informer cache does not
+// show yet is still counted as active. It only has to outlast the cache's watch
+// lag; if the Job vanished instead (deleted by hand), the slot frees after this.
+const admissionCacheGrace = 30 * time.Second
+
+// selfAdmitInterval coalesces the admission passes triggered by suspended
+// BuildJobs themselves. Each pass lists every Job in the namespace under the
+// admission lock, so letting each of S suspended BuildJobs run its own pass on
+// every resync would cost S passes and starve the running jobs' reconciles.
+// Completions bypass this: they free a slot and must always admit.
+const selfAdmitInterval = 1 * time.Second
 
 // logDrainRequeueDelay is how long to wait before re-reconciling a completed
 // BuildJob whose terminated containers still have unpublished logs.
@@ -70,6 +102,10 @@ const logDrainRequeueDelay = 1 * time.Second
 const DefaultLogDrainTimeout = 45 * time.Second
 
 const defaultPriority = 1
+
+// podTerminationGracePeriodSeconds is the build pod's grace period between
+// SIGTERM and SIGKILL. A build has nothing to flush on shutdown.
+const podTerminationGracePeriodSeconds = 5
 
 const (
 	LabelManagedBy = "hades.tum.de/managed-by"
@@ -91,25 +127,26 @@ const phasePending = "Pending"
 // BuildJobReconciler reconciles a BuildJob object
 type BuildJobReconciler struct {
 	client.Client
-	// APIReader reads straight from the API server, bypassing the manager's
-	// informer cache. Admission MUST use it: the cached client is eventually
-	// consistent, so counting running Jobs through it is a read-modify-write
-	// race. Under a burst the cache had not yet observed the Jobs created by
-	// the immediately preceding reconciles, every one of them counted the same
-	// stale total, and the limit stopped binding - measured at 59 concurrent
-	// Jobs against MaxParallelism=16. A deadline burst is exactly the case
-	// admission exists for, so the extra round-trip is the right trade.
+	// APIReader reads straight from the API server (mgr.GetAPIReader()). It is
+	// used where acting on a stale cached BuildJob would publish something twice
+	// (container log streams and the job status transitions) and for admission
+	// counting, where a stale cache let the limit stop binding under a burst
+	// (measured at 59 concurrent Jobs against MaxParallelism=16). Nil falls back
+	// to Client, which is what the unit tests' fake client provides anyway.
 	APIReader        client.Reader
 	Scheme           *runtime.Scheme
-	K8sClient        *kubernetes.Clientset
+	K8sClient        kubernetes.Interface
 	NatsConnection   *nats.Conn
 	DeleteOnComplete bool
 	Publisher        *log.NATSPublisher
 	MaxParallelism   uint
 
-	// RequeueDelay is how long to wait before re-reconciling a BuildJob whose Job
-	// is still progressing. Zero or negative falls back to DefaultRequeueDelay.
+	// RequeueDelay is the safety resync for a BuildJob whose Job is still
+	// progressing. Zero or negative falls back to DefaultRequeueDelay.
 	RequeueDelay time.Duration
+	// MaxConcurrentReconciles is the number of BuildJobs reconciled in parallel.
+	// Zero or negative falls back to DefaultMaxConcurrentReconciles.
+	MaxConcurrentReconciles int
 	// LogDrainTimeout bounds how long a completed BuildJob is held while its
 	// container logs drain. Zero or negative falls back to DefaultLogDrainTimeout.
 	LogDrainTimeout time.Duration
@@ -126,6 +163,82 @@ type BuildJobReconciler struct {
 	// lazily by logStreams() if left nil.
 	LogStreams     *logStreamRegistry
 	logStreamsOnce sync.Once
+
+	admission admissionTracker
+}
+
+// admissionTracker serializes MaxParallelism decisions across concurrent
+// reconciles. Counting active Jobs and then creating or unsuspending one is a
+// check-then-act on the informer cache: two workers could both see a free slot,
+// and a reader that lags behind the API server (the cache, which is what the
+// APIReader fallback gives) shows a worker its own earlier admission only once
+// the watch event lands. mu closes the first gap and pending the second.
+type admissionTracker struct {
+	mu sync.Mutex
+	// pending holds Jobs (namespace/name) admitted by this process that the
+	// cache may still show as suspended or not at all, with the admission time.
+	pending map[string]time.Time
+	// lastPass is when admitSuspendedJobs last ran per namespace, so the
+	// self-admission attempts of many suspended BuildJobs coalesce into one pass.
+	lastPass map[string]time.Time
+}
+
+func admissionKey(namespace, name string) string {
+	return namespace + "/" + name
+}
+
+// markAdmitted records an admission. Callers must hold mu.
+func (a *admissionTracker) markAdmitted(namespace, name string, now time.Time) {
+	if a.pending == nil {
+		a.pending = make(map[string]time.Time)
+	}
+	a.pending[admissionKey(namespace, name)] = now
+}
+
+// isPending reports whether a Job was admitted but the cache does not show it
+// yet. Callers must hold mu.
+func (a *admissionTracker) isPending(namespace, name string) bool {
+	_, ok := a.pending[admissionKey(namespace, name)]
+	return ok
+}
+
+// activeCount counts the namespace's running (non-finished, non-suspended) Jobs
+// in jobs, plus admissions the cache does not reflect yet. It forgets pending
+// entries once the cache has caught up or admissionCacheGrace has passed.
+// Callers must hold mu.
+func (a *admissionTracker) activeCount(namespace string, jobs []batchv1.Job, now time.Time) uint {
+	var active uint
+	for i := range jobs {
+		j := &jobs[i]
+		done, _, _ := jobFinished(j)
+		suspended := jobSuspended(j)
+		if done || !suspended {
+			delete(a.pending, admissionKey(j.Namespace, j.Name))
+		}
+		if !done && !suspended {
+			active++
+		}
+	}
+	prefix := namespace + "/"
+	for key, at := range a.pending {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if now.Sub(at) > admissionCacheGrace {
+			delete(a.pending, key)
+			continue
+		}
+		active++
+	}
+	return active
+}
+
+// apiReader returns the uncached reader, falling back to the client.
+func (r *BuildJobReconciler) apiReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // logStreams returns the reconciler's log-stream registry, creating it on first
@@ -144,6 +257,15 @@ func (r *BuildJobReconciler) logStreams() *logStreamRegistry {
 // controller-runtime requeue immediately and busy-loop the controller.
 func (r *BuildJobReconciler) requeueDelay() time.Duration {
 	return positiveOrDefault(r.RequeueDelay, DefaultRequeueDelay)
+}
+
+// maxConcurrentReconciles returns the configured worker count, falling back to
+// the default when unset or non-positive.
+func (r *BuildJobReconciler) maxConcurrentReconciles() int {
+	if r.MaxConcurrentReconciles <= 0 {
+		return DefaultMaxConcurrentReconciles
+	}
+	return r.MaxConcurrentReconciles
 }
 
 // logDrainTimeout returns the configured log-drain safety valve, falling back to
@@ -203,7 +325,9 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var bj buildv1.BuildJob
 	if err := r.Get(ctx, req.NamespacedName, &bj); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Object has been deleted; ignore it
+			// Finished log streams stay registered until stopJob. If the BuildJob
+			// was deleted before we finalized it, nobody else will clean them up.
+			r.logStreams().stopJob(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -217,7 +341,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// ----------------------------- 1. Exit if already processed ----------------------------------
 	// Only process objects that are not marked as "finalized" (i.e., not deleted)
-	if bj.Status.Phase == string(buildstatus.StatusSucceeded) || bj.Status.Phase == string(buildstatus.StatusFailed) {
+	if phaseFinal(bj.Status.Phase) {
 		r.logStreams().stopJob(bj.Namespace, bj.Name)
 		return ctrl.Result{}, nil
 	}
@@ -227,9 +351,28 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var existingJob batchv1.Job
 	err := r.Get(ctx, client.ObjectKey{Namespace: bj.Namespace, Name: jobName}, &existingJob)
 	if err == nil {
-		// Job already exists check the status of the containers. draining is true
-		// while a terminated container's live log stream is still publishing.
-		draining, pod, err := r.updateContainerStatuses(ctx, &bj)
+		// A suspended Job has no pod yet. It is normally admitted when another
+		// job finishes, but with several workers that admission can race this
+		// Job's creation and miss it, so a suspended Job also tries to admit
+		// itself (in priority order, via admitSuspendedJobs) whenever it is
+		// reconciled.
+		if jobSuspended(&existingJob) {
+			if done, _, _ := jobFinished(&existingJob); !done {
+				if err := r.selfAdmitSuspendedJobs(ctx, bj.Namespace); err != nil {
+					slog.Error("Failed to admit suspended jobs", "buildJob", bj.Name, "error", err)
+				}
+				return ctrl.Result{RequeueAfter: r.requeueDelay()}, nil
+			}
+		}
+
+		// Job already exists check the status of the containers. snap.draining is
+		// true while a terminated container's live log stream is still publishing.
+		snap, err := r.updateContainerStatuses(ctx, &bj, &existingJob)
+		if errors.Is(err, errBuildJobFinalized) {
+			// The cached BuildJob was stale: another reconcile already finalized it.
+			r.logStreams().stopJob(bj.Namespace, bj.Name)
+			return ctrl.Result{}, nil
+		}
 		if err != nil {
 			// When a Job hits its activeDeadlineSeconds (whole-job timeout),
 			// Kubernetes marks the Job Failed (reason DeadlineExceeded) and deletes
@@ -239,7 +382,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// is already gone, so there is nothing left to drain.
 			if done, succeeded, msg := jobFinished(&existingJob); done {
 				slog.Warn("Container status update failed but Job already finished; finalizing", "buildJob", bj.Name, "reason", msg)
-				if serr := r.setStatusCompleted(ctx, req.NamespacedName, bj.Name, succeeded, msg); serr != nil {
+				if _, serr := r.setStatusCompleted(ctx, req.NamespacedName, bj.Name, succeeded, msg); serr != nil {
 					if apierrors.IsConflict(serr) {
 						return ctrl.Result{RequeueAfter: conflictRequeueDelay}, nil
 					}
@@ -252,10 +395,18 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 						return ctrl.Result{}, derr
 					}
 				}
-				if aerr := r.admitOneSuspendedJob(ctx, bj.Namespace); aerr != nil {
+				if aerr := r.admitSuspendedJobs(ctx, bj.Namespace); aerr != nil {
 					slog.Error("Failed to admit suspended job after timeout finalization", "error", aerr)
 				}
 				return ctrl.Result{}, nil
+			}
+
+			// A just-created or just-admitted Job has no pod for a moment. That
+			// is not a failure, and returning an error here would put the
+			// BuildJob on exponential backoff right when it is about to start.
+			if errors.Is(err, k8s.ErrPodNotFound) {
+				slog.Debug("Pod not created yet", "buildJob", bj.Name)
+				return ctrl.Result{RequeueAfter: podPendingRequeueDelay}, nil
 			}
 
 			// draining is unreliable when the status update failed, so requeue
@@ -264,6 +415,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			slog.Error("Failed to update container statuses", "error", err)
 			return ctrl.Result{}, fmt.Errorf("updating container statuses: %w", err)
 		}
+		pod := snap.pod
 
 		// A pod wedged in a terminal waiting state (e.g. ImagePullBackOff) never
 		// runs, so its Job never gets a Complete/Failed condition and jobFinished
@@ -274,7 +426,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// logs to wait for.
 		if reason, stuck := podStuckReason(pod); stuck {
 			slog.Warn("BuildJob pod is stuck; failing", "buildJob", bj.Name, "reason", reason)
-			if err := r.setStatusCompleted(ctx, req.NamespacedName, bj.Name, false, reason); err != nil {
+			if _, err := r.setStatusCompleted(ctx, req.NamespacedName, bj.Name, false, reason); err != nil {
 				if apierrors.IsConflict(err) {
 					return ctrl.Result{RequeueAfter: conflictRequeueDelay}, nil
 				}
@@ -294,7 +446,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 					return ctrl.Result{}, err
 				}
 			}
-			if err := r.admitOneSuspendedJob(ctx, bj.Namespace); err != nil {
+			if err := r.admitSuspendedJobs(ctx, bj.Namespace); err != nil {
 				slog.Error("Failed to admit suspended job after stuck-pod failure", "error", err)
 			}
 			return ctrl.Result{}, nil
@@ -304,8 +456,10 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		done, succeeded, msg := jobFinished(&existingJob)
 		if done {
 			// Hold off finalizing (and deleting the pod) until every container's
-			// log stream has drained, so no tail logs are lost.
-			if draining {
+			// log stream has drained, so no tail logs are lost. A cleanly finished
+			// stream enqueues the BuildJob itself (see logStreamRegistry.events);
+			// the requeue is the fallback for a dropped event or a failed stream.
+			if snap.draining {
 				return ctrl.Result{RequeueAfter: logDrainRequeueDelay}, nil
 			}
 
@@ -316,25 +470,20 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// terminal phase would trip the early-return guard at the top of
 			// Reconcile, so we keep the phase non-terminal and requeue until the
 			// logs are drained (or a safety valve fires).
-			if r.DeleteOnComplete {
-				drained, podGone, drainErr := r.logsDrained(ctx, &bj)
-				timedOut := time.Since(jobCompletionTime(&existingJob)) > r.logDrainTimeout()
-
-				if drainErr != nil && !timedOut {
-					return ctrl.Result{}, drainErr
-				}
-				if drainErr == nil && !drained && !podGone && !timedOut {
-					slog.Info("Waiting for terminated container logs to be published before deleting", "buildJob", bj.Name)
-					return ctrl.Result{RequeueAfter: logDrainRequeueDelay}, nil
-				}
-				if podGone && !drained {
-					slog.Warn("Pod gone before all logs were drained; deleting anyway", "buildJob", bj.Name)
-				} else if timedOut && !drained {
-					slog.Warn("Timed out waiting for logs to drain; deleting anyway", "buildJob", bj.Name)
-				}
+			//
+			// The pod and statuses come from this reconcile's own status pass. A
+			// pod that is already gone never gets here: resolving it fails and the
+			// error branch above finalizes without draining.
+			timedOut := time.Since(jobCompletionTime(&existingJob)) > r.logDrainTimeout()
+			if wait, why := drainGate(pod, snap.statuses, r.DeleteOnComplete, timedOut); wait {
+				slog.Info("Waiting before finalizing", "buildJob", bj.Name, "reason", why)
+				return ctrl.Result{RequeueAfter: logDrainRequeueDelay}, nil
+			} else if why != "" {
+				slog.Warn("Finalizing before logs drained", "buildJob", bj.Name, "reason", why)
 			}
 
-			if err := r.setStatusCompleted(ctx, req.NamespacedName, bj.Name, succeeded, msg); err != nil {
+			changed, err := r.setStatusCompleted(ctx, req.NamespacedName, bj.Name, succeeded, msg)
+			if err != nil {
 				if apierrors.IsConflict(err) {
 					return ctrl.Result{RequeueAfter: conflictRequeueDelay}, nil
 				}
@@ -342,10 +491,12 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 
 			// Emit the job's overhead/runtime breakdown, derived from the pod's
-			// container timestamps. This runs exactly once: setStatusCompleted has
-			// set the terminal phase, so the guard at the top of Reconcile
-			// short-circuits every later reconcile of this BuildJob.
-			r.emitJobTiming(ctx, &bj)
+			// container timestamps. Only the reconcile that actually made the
+			// terminal transition records it; a concurrent one working from a
+			// stale cache sees changed=false.
+			if changed {
+				r.emitJobTiming(ctx, &bj, pod)
+			}
 
 			// All logs are published; stop tracking this job's streams.
 			r.logStreams().stopJob(bj.Namespace, bj.Name)
@@ -353,7 +504,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// If DeleteOnComplete is false, don't delete the CR, used for debugging
 			if !r.DeleteOnComplete {
 				// If there is available concurrency, admit one suspended job (optional)
-				if err := r.admitOneSuspendedJob(ctx, bj.Namespace); err != nil {
+				if err := r.admitSuspendedJobs(ctx, bj.Namespace); err != nil {
 					slog.Error("Failed to admit suspended job after completion", "error", err)
 				}
 				return ctrl.Result{}, nil
@@ -366,7 +517,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 
 			// Once a old job is deleted, admit one suspended job
-			if err := r.admitOneSuspendedJob(ctx, bj.Namespace); err != nil {
+			if err := r.admitSuspendedJobs(ctx, bj.Namespace); err != nil {
 				slog.Error("Failed to admit suspended job after deletion", "error", err)
 			}
 			return ctrl.Result{}, nil
@@ -374,7 +525,7 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 		// Build is not done, set the status to be "running"
 		if bj.Status.Phase != string(buildstatus.StatusRunning) {
-			if err := r.setStatusRunning(ctx, req.NamespacedName, jobName, bj.Name); err != nil {
+			if err := r.setStatusRunning(ctx, req.NamespacedName, bj.Name); err != nil {
 				if apierrors.IsConflict(err) {
 					return ctrl.Result{RequeueAfter: conflictRequeueDelay}, nil
 				}
@@ -382,11 +533,9 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 		}
 
-		// Requeue while the job runs. The operator watches only BuildJobs and owned
-		// Jobs, not Pods, so a Job whose init containers are progressing produces no
-		// events between creation and completion. Periodic requeues are how the
-		// operator observes each container entering Running (to start its live log
-		// stream) and terminating (to finalize once its stream drains).
+		// Container transitions arrive as pod events and finished log streams as
+		// channel events, so this requeue is only the safety resync (see
+		// DefaultRequeueDelay).
 		return ctrl.Result{RequeueAfter: r.requeueDelay()}, nil
 	}
 
@@ -395,31 +544,11 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// ----------------------------- 3. First-time creation -----------------------------
-	// 3.0 check concurrency limit and current active jobs
-	active, err := r.countActiveJobs(ctx, bj.Namespace)
+	// 3.0-3.3 Check the concurrency limit and create the Job (initContainers =
+	// bj.Spec.Steps), suspended if the limit is reached.
+	active, shouldSuspend, err := r.createJob(ctx, &bj, jobName)
 	if err != nil {
 		return ctrl.Result{}, err
-	}
-	shouldSuspend := active >= r.MaxParallelism
-
-	// 3.1 Create Kubernetes Job (initContainers = bj.Spec.Steps)
-	k8sJob := buildK8sJob(&bj, jobName, r.DeleteOnComplete, shouldSuspend, r.finalizerImage(), r.ImagePullPolicy)
-
-	// 3.2 Set OwnerReference
-	if err := controllerutil.SetControllerReference(&bj, k8sJob, r.Scheme); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// 3.3 Create Job in Kubernetes as Pod
-	slog.Info("Creating Job for BuildJob", "job", k8sJob.Name)
-
-	if err := r.Create(ctx, k8sJob); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			slog.Debug("Job already exists, ", "job", k8sJob.Name)
-		} else {
-			slog.Error("cannot create Job", "error", err)
-			return ctrl.Result{}, err
-		}
 	}
 
 	// 3.3.1 Initialize container statuses
@@ -442,31 +571,83 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	//3.4.2 Otherwise, set to Running
-	if err := r.setStatusRunning(ctx, req.NamespacedName, jobName, bj.Name); err != nil {
+	if err := r.setStatusRunning(ctx, req.NamespacedName, bj.Name); err != nil {
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{RequeueAfter: conflictRequeueDelay}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
-	// Requeue so the operator observes container transitions and drives live log
-	// streaming while the Job runs (Pods are not watched directly).
+	// The pod's creation and container transitions arrive as pod events; this
+	// is only the safety resync.
 	return ctrl.Result{RequeueAfter: r.requeueDelay()}, nil
 }
 
-// setStatusRunning sets BuildJob.Status to "Running", records StartTime and PodName.
+// createJob creates the BuildJob's Job, suspended when MaxParallelism Jobs are
+// already active. The count and the create happen under the admission lock so
+// concurrent reconciles cannot all claim the same free slot.
+func (r *BuildJobReconciler) createJob(ctx context.Context, bj *buildv1.BuildJob, jobName string) (active uint, suspended bool, err error) {
+	r.admission.mu.Lock()
+	defer r.admission.mu.Unlock()
+
+	jobs, err := r.listManagedJobs(ctx, bj.Namespace)
+	if err != nil {
+		return 0, false, err
+	}
+	active = r.admission.activeCount(bj.Namespace, jobs, time.Now())
+	suspended = active >= r.MaxParallelism
+
+	k8sJob := buildK8sJob(bj, jobName, r.DeleteOnComplete, suspended, r.finalizerImage(), r.ImagePullPolicy)
+	if err := controllerutil.SetControllerReference(bj, k8sJob, r.Scheme); err != nil {
+		return 0, false, err
+	}
+
+	slog.Info("Creating Job for BuildJob", "job", k8sJob.Name, "suspended", suspended)
+	if err := r.Create(ctx, k8sJob); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			slog.Error("cannot create Job", "error", err)
+			return 0, false, err
+		}
+		// The Job is left over from an earlier attempt whose status write
+		// failed. Its suspend flag was decided back then, so report that one
+		// rather than what this pass would have chosen.
+		slog.Debug("Job already exists", "job", k8sJob.Name)
+		var existing batchv1.Job
+		if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(k8sJob), &existing); err != nil {
+			return 0, false, err
+		}
+		return active, jobSuspended(&existing), nil
+	}
+	if !suspended {
+		r.admission.markAdmitted(bj.Namespace, jobName, time.Now())
+	}
+	return active, suspended, nil
+}
+
+// setStatusRunning sets BuildJob.Status to "Running" and records StartTime.
 // publishes "running" jobstatus to NATS.
 // Uses optimistic concurrency (RetryOnConflict).
-func (r *BuildJobReconciler) setStatusRunning(ctx context.Context, nn types.NamespacedName, jobName string, jobID string) error {
+//
+// PodName is deliberately not touched: it is owned by writeContainerStatuses,
+// which records the real pod name once the pod exists.
+//
+// Like setStatusCompleted it reads uncached and patches with an optimistic
+// lock, and publishes only when it made the transition itself, so two
+// reconciles racing on a stale cache cannot both announce Running.
+func (r *BuildJobReconciler) setStatusRunning(ctx context.Context, nn types.NamespacedName, jobID string) error {
+	changed := false
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		changed = false
 		latest := &buildv1.BuildJob{}
-		if err := r.Get(ctx, nn, latest); err != nil {
+		if err := r.apiReader().Get(ctx, nn, latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		if latest.DeletionTimestamp != nil {
 			return nil
 		}
-		if latest.Status.Phase == string(buildstatus.StatusRunning) {
+		// Any phase past Pending means another reconcile got here first; a
+		// terminal phase in particular must not regress to Running.
+		if latest.Status.Phase != "" && latest.Status.Phase != phasePending {
 			return nil
 		}
 
@@ -474,15 +655,18 @@ func (r *BuildJobReconciler) setStatusRunning(ctx context.Context, nn types.Name
 		now := metav1.Now()
 		latest.Status.Phase = string(buildstatus.StatusRunning)
 		latest.Status.StartTime = &now
-		latest.Status.PodName = jobName
 
-		if err := r.Status().Patch(ctx, latest, client.MergeFrom(base)); err != nil {
+		if err := r.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			slog.Error("Failed to patch BuildJob status to Running", "error", err)
 			return err
 		}
+		changed = true
 		return nil
 	}); err != nil {
 		return err
+	}
+	if !changed {
+		return nil
 	}
 
 	if err := r.Publisher.PublishJobStatus(ctx, buildstatus.StatusRunning, jobID); err != nil {
@@ -496,17 +680,23 @@ func (r *BuildJobReconciler) setStatusRunning(ctx context.Context, nn types.Name
 // setStatusCompleted marks BuildJob.Status as Succeeded/Failed and sets CompletionTime/message.
 // publishes "success" or "failed" jobstatus to NATS.
 // Uses optimistic concurrency (RetryOnConflict).
-func (r *BuildJobReconciler) setStatusCompleted(ctx context.Context, nn types.NamespacedName, jobID string, succeeded bool, msg string) error {
+//
+// changed reports whether this call made the terminal transition. The read is
+// uncached and the patch carries the resourceVersion: a reconcile triggered by
+// a pod event right after finalization still sees the cached BuildJob as
+// Running, and without both it would publish the terminal status a second time.
+func (r *BuildJobReconciler) setStatusCompleted(ctx context.Context, nn types.NamespacedName, jobID string, succeeded bool, msg string) (changed bool, err error) {
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		changed = false
 		latest := &buildv1.BuildJob{}
-		if err := r.Get(ctx, nn, latest); err != nil {
+		if err := r.apiReader().Get(ctx, nn, latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		if latest.DeletionTimestamp != nil {
 			return nil
 		}
 
-		if latest.Status.Phase == string(buildstatus.StatusSucceeded) || latest.Status.Phase == string(buildstatus.StatusFailed) {
+		if phaseFinal(latest.Status.Phase) {
 			return nil
 		}
 
@@ -520,26 +710,60 @@ func (r *BuildJobReconciler) setStatusCompleted(ctx context.Context, nn types.Na
 		latest.Status.Message = msg
 		latest.Status.CompletionTime = &now
 
-		return r.Status().Patch(ctx, latest, client.MergeFrom(base))
+		if err := r.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		changed = true
+		return nil
 	}); err != nil {
-		return err
+		return false, err
+	}
+	if !changed {
+		return false, nil
 	}
 
+	// Don't return publish errors. The phase is already saved, so a requeue
+	// stops at the phaseFinal check and never retries the publish, while the
+	// caller would bail out before deleting the CR and admitting the next job.
 	if succeeded {
 		if err := r.Publisher.PublishJobStatus(ctx, buildstatus.StatusSucceeded, jobID); err != nil {
 			slog.Error("Failed to publish job succeeded status", "job_id", jobID, "error", err)
-			return err
+			return true, nil
 		}
 		slog.Info("Published job succeeded status", "job_id", jobID)
-		return nil
-	} else {
-		if err := r.Publisher.PublishJobStatus(ctx, buildstatus.StatusFailed, jobID, msg); err != nil {
-			slog.Error("Failed to publish job failed status", "job_id", jobID, "error", err)
-			return err
-		}
-		slog.Info("Published job failed status", "job_id", jobID)
-		return nil
+		return true, nil
 	}
+	if err := r.Publisher.PublishJobStatus(ctx, buildstatus.StatusFailed, jobID, msg); err != nil {
+		slog.Error("Failed to publish job failed status", "job_id", jobID, "error", err)
+		return true, nil
+	}
+	slog.Info("Published job failed status", "job_id", jobID)
+	return true, nil
+}
+
+// drainGate decides whether a BuildJob whose Job has finished must wait before
+// it is finalized. Finalizing cancels every log stream and, with
+// deleteOnComplete, deletes the pod, so it waits for:
+//   - the pod to reach a terminal phase. The Job's condition can be ahead of the
+//     cached pod, which may still show a step as Running; that step does not
+//     count as terminated below, and its stream would be cut before EOF.
+//   - with deleteOnComplete, every terminated container's logs to be published,
+//     because Kubernetes only serves container logs while the pod exists.
+//
+// timedOut (logDrainTimeout since the Job finished) overrides both; why then
+// explains what was skipped, for the log.
+func drainGate(pod *corev1.Pod, statuses []buildv1.ContainerStatus, deleteOnComplete, timedOut bool) (wait bool, why string) {
+	if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+		why = fmt.Sprintf("pod phase is %q, not terminal yet", pod.Status.Phase)
+	} else if deleteOnComplete && !allTerminatedLogsPublished(pod, statuses) {
+		why = "terminated container logs not published yet"
+	} else {
+		return false, ""
+	}
+	if timedOut {
+		return false, "timed out: " + why
+	}
+	return true, why
 }
 
 // setStatusPending marks BuildJob.Status as Pending with a message.
@@ -686,6 +910,7 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		VolumeMounts:    []corev1.VolumeMount{sharedMount},
 	}
 
+	gracePeriod := int64(podTerminationGracePeriodSeconds)
 	podSpec := corev1.PodSpec{
 		InitContainers: initCtrs,
 		Containers:     []corev1.Container{dummy},
@@ -696,6 +921,10 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 			},
 		}},
 		RestartPolicy: corev1.RestartPolicyNever,
+		// Step scripts run as `sh -c` PID 1, which ignores SIGTERM, so on a
+		// deadline or a delete the kubelet would otherwise sit out the default
+		// 30s grace period before killing the pod.
+		TerminationGracePeriodSeconds: &gracePeriod,
 	}
 
 	ttl := (*int32)(nil)
@@ -730,7 +959,11 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 			// containers (the build steps). nil when no timeout is configured.
 			ActiveDeadlineSeconds: bj.Spec.TimeoutSeconds,
 			Template: corev1.PodTemplateSpec{
-				Spec: podSpec,
+				// The operator's pod informer is filtered on LabelManagedBy and its
+				// pod watch maps LabelBuildJob back to the BuildJob, so the pod
+				// needs the same labels as the Job.
+				ObjectMeta: metav1.ObjectMeta{Labels: maps.Clone(labels)},
+				Spec:       podSpec,
 			},
 		},
 	}
@@ -773,13 +1006,35 @@ func envFromMeta(m map[string]string) []corev1.EnvVar {
 	return envs
 }
 
-// SetupWithManager registers the controller, watching BuildJobs and owned Jobs.
+// SetupWithManager registers the controller. Besides BuildJobs and the Jobs it
+// owns, it watches the build pods (container transitions drive log streaming and
+// completion) and the log-stream registry's finished-stream events, so a running
+// job progresses on events instead of on the RequeueDelay poll.
 func (r *BuildJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&buildv1.BuildJob{}).
 		Owns(&batchv1.Job{}).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(podToBuildJob)).
+		WatchesRawSource(source.Channel(r.logStreams().Events(), &handler.EnqueueRequestForObject{})).
+		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: r.maxConcurrentReconciles()}).
 		Named("buildjob").
 		Complete(r)
+}
+
+// podToBuildJob maps a build pod to its BuildJob. Pods are owned by the Job, not
+// the BuildJob, so the owner-reference handlers cannot do this; the pod
+// template carries LabelBuildJob instead (see buildK8sJob). Pods created before
+// that label existed are not mapped; the resync requeue still covers them.
+func podToBuildJob(_ context.Context, obj client.Object) []reconcile.Request {
+	labels := obj.GetLabels()
+	if labels[LabelManagedBy] != ManagedByValue {
+		return nil
+	}
+	name := labels[LabelBuildJob]
+	if name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}}}
 }
 
 // jobFinished checks Job conditions and reports terminal state and reason.
@@ -825,121 +1080,119 @@ func jobCompletionTime(k8sJob *batchv1.Job) time.Time {
 	return latest
 }
 
-// countActiveJobs counts the number of non-completed, non-suspended Jobs in the given namespace.
-// admissionReader returns the reader admission decisions must use. It is the
-// uncached APIReader when wired; it falls back to the cached client only so
-// tests and any caller that has not set it keep working, never as a default
-// worth relying on.
-func (r *BuildJobReconciler) admissionReader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	return r.Client
-}
-
-func (r *BuildJobReconciler) countActiveJobs(ctx context.Context, namespace string) (uint, error) {
+// listManagedJobs lists the operator's Jobs in namespace for admission. It reads
+// uncached: the pending tracker only covers this process's own admissions, so a
+// cache that has not caught up with everything else would still undercount.
+// When it does fall back to the cache, the items are the cache's own objects
+// (no deep copy), so callers must copy before mutating.
+func (r *BuildJobReconciler) listManagedJobs(ctx context.Context, namespace string) ([]batchv1.Job, error) {
 	var jl batchv1.JobList
-	if err := r.admissionReader().List(ctx, &jl,
+	if err := r.apiReader().List(ctx, &jl,
 		client.InNamespace(namespace),
 		client.MatchingLabels{LabelManagedBy: ManagedByValue},
+		client.UnsafeDisableDeepCopy,
 	); err != nil {
-		return 0, err
+		return nil, err
 	}
-	active := 0
-	for _, j := range jl.Items {
-		done, _, _ := jobFinished(&j)
-		if done {
-			continue
-		}
-		// Unless the job is completed or suspended, count it as active
-		if j.Spec.Suspend == nil || !*j.Spec.Suspend {
-			active++
-		}
-	}
-	return uint(active), nil
+	return jl.Items, nil
 }
 
-// admitOneSuspendedJob unsuspends the oldest suspended Job in the given namespace, if any.
-func (r *BuildJobReconciler) admitOneSuspendedJob(ctx context.Context, namespace string) error {
-	// Capacity check before admitting, not just "one out, one in".
-	//
-	// This function is reached from several completion paths, so a batch of
-	// Jobs finishing at once drives several reconciles that each admit one,
-	// without any of them asking whether there is room. Measured on a 50-job
-	// burst against MaxParallelism=16: 22 pods ran concurrently even after
-	// admission counting was made uncached, because the admit side never
-	// consulted the limit at all.
-	if r.MaxParallelism > 0 {
-		active, err := r.countActiveJobs(ctx, namespace)
-		if err != nil {
-			return err
-		}
-		if active >= r.MaxParallelism {
-			slog.Debug("Not admitting: at the parallelism limit",
-				"active", active, "limit", r.MaxParallelism)
-			return nil
-		}
-	}
+// selfAdmitSuspendedJobs is admitSuspendedJobs for a suspended BuildJob's own
+// reconcile, coalesced to one pass per namespace per selfAdmitInterval.
+func (r *BuildJobReconciler) selfAdmitSuspendedJobs(ctx context.Context, namespace string) error {
+	return r.admitSuspendedJobsEvery(ctx, namespace, selfAdmitInterval)
+}
 
-	var jl batchv1.JobList
-	// Uncached for the same reason as countActiveJobs: picking from a stale
-	// list can admit a Job that another reconcile already unsuspended, which
-	// overshoots the limit instead of holding it.
-	if err := r.admissionReader().List(ctx, &jl,
-		client.InNamespace(namespace),
-		client.MatchingLabels{LabelManagedBy: ManagedByValue},
-	); err != nil {
+// admitSuspendedJobs unsuspends suspended Jobs in the given namespace, highest
+// priority (then oldest) first, until MaxParallelism Jobs are active. It runs
+// under the admission lock and skips Jobs it already admitted whose new state
+// the cache does not show yet, so concurrent reconciles neither exceed the limit
+// nor admit the same Job twice.
+func (r *BuildJobReconciler) admitSuspendedJobs(ctx context.Context, namespace string) error {
+	return r.admitSuspendedJobsEvery(ctx, namespace, 0)
+}
+
+// admitSuspendedJobsEvery skips the pass if the namespace had one less than
+// minInterval ago; 0 always runs it.
+func (r *BuildJobReconciler) admitSuspendedJobsEvery(ctx context.Context, namespace string, minInterval time.Duration) error {
+	r.admission.mu.Lock()
+	defer r.admission.mu.Unlock()
+
+	now := time.Now()
+	if minInterval > 0 && now.Sub(r.admission.lastPass[namespace]) < minInterval {
+		return nil
+	}
+	if r.admission.lastPass == nil {
+		r.admission.lastPass = make(map[string]time.Time)
+	}
+	r.admission.lastPass[namespace] = now
+
+	jobs, err := r.listManagedJobs(ctx, namespace)
+	if err != nil {
 		return err
 	}
-
-	pick, bestPri := r.pickBestSuspendedJob(ctx, jl.Items)
-	if pick == nil {
+	active := r.admission.activeCount(namespace, jobs, now)
+	if active >= r.MaxParallelism {
 		return nil
 	}
 
-	base := pick.DeepCopy()
-	f := false
-	pick.Spec.Suspend = &f
-
-	slog.Info("Admitting suspended Job", "job", pick.Name, "priority", bestPri)
-
-	return r.Patch(ctx, pick, client.MergeFrom(base))
-}
-
-func (r *BuildJobReconciler) pickBestSuspendedJob(ctx context.Context, jobs []batchv1.Job) (*batchv1.Job, int) {
-	var pick *batchv1.Job
-	bestPri := -1
-
+	// Priority comes from the Job's own label only. buildK8sJob copies it from
+	// the BuildJob when the Job is created, so looking the BuildJob up as well
+	// would cost a Get per candidate per pass to learn the same value.
+	type candidate struct {
+		job      *batchv1.Job
+		priority int
+	}
+	candidates := make([]candidate, 0)
 	for i := range jobs {
 		j := &jobs[i]
-
-		done, _, _ := jobFinished(j)
-		if done || j.Spec.Suspend == nil || !*j.Spec.Suspend {
+		if done, _, _ := jobFinished(j); done || !jobSuspended(j) {
 			continue
 		}
-
-		pri := r.priorityForJob(ctx, j)
-		if pick == nil || pri > bestPri || (pri == bestPri && j.CreationTimestamp.Before(&pick.CreationTimestamp)) {
-			pick = j
-			bestPri = pri
+		if r.admission.isPending(j.Namespace, j.Name) {
+			continue
 		}
+		candidates = append(candidates, candidate{j, priorityFromLabels(j.Labels, defaultPriority)})
 	}
+	sort.SliceStable(candidates, func(a, b int) bool {
+		ca, cb := candidates[a], candidates[b]
+		if ca.priority != cb.priority {
+			return ca.priority > cb.priority
+		}
+		return ca.job.CreationTimestamp.Before(&cb.job.CreationTimestamp)
+	})
 
-	return pick, bestPri
+	for _, c := range candidates {
+		if active >= r.MaxParallelism {
+			break
+		}
+		// c.job is the cache's object (see listManagedJobs); patch a copy.
+		admitted := c.job.DeepCopy()
+		f := false
+		admitted.Spec.Suspend = &f
+
+		slog.Info("Admitting suspended Job", "job", admitted.Name, "priority", c.priority)
+		if err := r.Patch(ctx, admitted, client.MergeFrom(c.job)); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		r.admission.markAdmitted(admitted.Namespace, admitted.Name, now)
+		active++
+	}
+	return nil
 }
 
-func (r *BuildJobReconciler) priorityForJob(ctx context.Context, j *batchv1.Job) int {
-	pri := priorityFromLabels(j.Labels, defaultPriority) // default priority is 1 (lowest priority)
-	if pri != defaultPriority {
-		return pri
-	}
-	if bjName, ok := j.Labels[LabelBuildJob]; ok && bjName != "" {
-		var bj buildv1.BuildJob
-		if err := r.Get(ctx, types.NamespacedName{Namespace: j.Namespace, Name: bjName}, &bj); err == nil {
-			return priorityFromLabels(bj.Labels, defaultPriority)
-		}
-	}
-	return 1
+func jobSuspended(j *batchv1.Job) bool {
+	return j.Spec.Suspend != nil && *j.Spec.Suspend
+}
+
+// phaseFinal reports whether a BuildJob phase is one the operator writes as its
+// last. Not buildstatus.IsTerminal: that also counts Stopped, which the operator
+// never sets.
+func phaseFinal(phase string) bool {
+	return phase == string(buildstatus.StatusSucceeded) || phase == string(buildstatus.StatusFailed)
 }
 
 func priorityFromLabels(labels map[string]string, defaultVal int) int {

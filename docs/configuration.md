@@ -47,7 +47,7 @@ Hades instruments how much overhead it adds around a job, broken down per step a
 | `container_remove` | overhead | docker | container cleanup |
 | `step_wait` | overhead | k8s | scheduling + image pull before a step's container starts |
 | `step_run` | **runtime** | k8s | the step container running (from pod timestamps) |
-| `reconcile_detection_lag` | overhead | k8s | last step finishing → the operator observing completion (dominated by the 2 s requeue poll) |
+| `reconcile_detection_lag` | overhead | k8s | last step finishing → the operator observing completion (driven by pod and log-stream events; the requeue is only a fallback) |
 
 Per-job rollups are logged and exported: `overhead_total`, `runtime_total`, `wall_total`, and `overhead_pct = overhead / (overhead + runtime)`.
 
@@ -101,6 +101,7 @@ Plus the [NATS](#nats-connection-all-components) and [global](#global-all-compon
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon endpoint. | `HadesScheduler/docker/env.go` (`EnvConfig`) |
 | `DOCKER_CONTAINER_AUTOREMOVE` | `false` | Auto-remove step containers after they exit. Keep `false` to retain logs post-run. | `HadesScheduler/docker/env.go` |
 | `DOCKER_IMAGE_PULL_POLICY` | `always` | Whether a step contacts the registry for an image that is already in the local daemon. `always` pulls every time (the historical behaviour, and the only safe choice for mutable tags such as `:latest`); `if-not-present` skips the pull when the image is already local; `never` never contacts the registry and fails a step whose image is absent. Note that `always` is not free even on a cache hit: Docker re-resolves the tag, fetches the manifest and checks every layer, measured at ~2.2s per step for a one-layer image and more for a large one. On a job whose images are all pre-pulled that was ~63% of the executor's per-job overhead. Switch to `if-not-present` only when the images are referenced immutably (by digest, or by a tag that is never moved), because a cached image is then never refreshed. Mirrors Kubernetes' `imagePullPolicy`, but spelled in lower-case-with-hyphens; the Kubernetes spellings are rejected rather than silently accepted. | `HadesScheduler/docker/env.go` |
+| `DOCKER_IMAGE_PULL_FRESHNESS` | `0s` | Under `always`, lets a job skip the registry for a locally present image that this scheduler pulled successfully within the window (e.g. `30s`), so back-to-back jobs on the same image stop paying the pull round trip. A moved tag is then picked up at most one window late. `0s` keeps `always` meaning every job. Independent of this setting, concurrent jobs share one in-flight pull of the same image, and a digest-pinned image that is already present is never re-pulled. | `HadesScheduler/docker/env.go` |
 | `DOCKER_SCRIPT_EXECUTOR` | `/bin/bash -c` | Shell used to run each step's `script`. | `HadesScheduler/docker/env.go` |
 | `DOCKER_CPU_LIMIT` | | Default CPU limit (whole CPUs, e.g. `6`) when a step sets none. | `HadesScheduler/docker/env.go` |
 | `DOCKER_MEMORY_LIMIT` | | Default memory limit (e.g. `4g`) when a step sets none. | `HadesScheduler/docker/env.go` |
@@ -110,6 +111,7 @@ Plus the [NATS](#nats-connection-all-components) and [global](#global-all-compon
 | Variable | Default | Description | Source |
 | -------- | ------- | ----------- | ------ |
 | `K8S_NAMESPACE` | `hades-executor` | Namespace jobs are scheduled into. | `HadesScheduler/k8s/k8s.go` |
+| `K8S_CLIENT_QPS` / `K8S_CLIENT_BURST` | `50` / `100` | Client-side rate limit for creating BuildJobs. client-go's own default (5 / 10) queues bursts of submissions in the scheduler. | `HadesScheduler/k8s/k8s.go` |
 | `BUILDJOB_GROUP` | `build.hades.tum.de` | API group of the `BuildJob` CRD. | `HadesScheduler/k8s/k8s.go` (`BuildJobGVRConfig`) |
 | `BUILDJOB_VERSION` | `v1` | API version of the `BuildJob` CRD. | `HadesScheduler/k8s/k8s.go` |
 | `BUILDJOB_RESOURCE` | `buildjobs` | Plural resource name of the `BuildJob` CRD. | `HadesScheduler/k8s/k8s.go` |
@@ -123,9 +125,11 @@ Only deployed when the scheduler runs in `operator` mode.
 | `WATCH_NAMESPACE` | | Namespace the operator watches for `BuildJob` CRs. Empty means all namespaces (subject to RBAC). | `HadesScheduler/HadesOperator/cmd/main.go` (`NSConfig`) |
 | `DELETE_ON_COMPLETE` | `true` | Delete the `BuildJob` CR (and its `Job`) once it finishes. Set `false` to retain them for debugging. | `HadesScheduler/HadesOperator/cmd/main.go` (`OperatorConfig`) |
 | `MAX_PARALLELISM` | `100` | Maximum number of `Job`s the operator admits concurrently; excess jobs are suspended. | `HadesScheduler/HadesOperator/cmd/main.go` (`OperatorConfig`) |
-| `REQUEUE_DELAY` | `2s` | How often the operator re-reconciles a running `BuildJob` (Go duration). The operator does not watch Pods, so container transitions and job completion are only observed on these requeues; lower it for faster completion detection at the cost of more API traffic. A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. | `HadesScheduler/HadesOperator/cmd/main.go` (`OperatorConfig`) |
+| `MAX_CONCURRENT_RECONCILES` | `8` | Number of `BuildJob`s the operator reconciles in parallel. A zero or negative value falls back to the default. | `HadesScheduler/HadesOperator/cmd/main.go` (`OperatorConfig`) |
+| `REQUEUE_DELAY` | `15s` | Safety resync for a running `BuildJob` (Go duration). The operator watches its Pods, Jobs and log streams, so container transitions and completion are handled as events; this resync only catches a missed event. A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. | `HadesScheduler/HadesOperator/cmd/main.go` (`OperatorConfig`) |
 | `LOG_DRAIN_TIMEOUT` | `45s` | How long a completed `BuildJob` is kept while its container logs drain, before it is deleted anyway (Go duration). Only relevant with `DELETE_ON_COMPLETE=true`. A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. | `HadesScheduler/HadesOperator/cmd/main.go` (`OperatorConfig`) |
 | `FINALIZER_IMAGE` | `busybox:1.37.0` | Image for the main container of every `BuildJob` pod. Kubernetes requires at least one non-init container and the build steps run as init containers, so this one exists only to exit once they are done: it runs `sh -c "echo build finished"` and needs nothing but a shell. Override it for clusters that cannot reach Docker Hub, or to point at a mirror. Keep it pinned to an explicit tag: an untagged image resolves to `:latest`, which Kubernetes special-cases to `imagePullPolicy: Always`, adding a registry round trip to every job for an image the node already has. Empty falls back to the default. | `HadesScheduler/HadesOperator/cmd/main.go` |
+| `K8S_IMAGE_PULL_POLICY` | | `imagePullPolicy` for build step containers: `always`, `if-not-present` or `never` (case-insensitive). Empty leaves it unset, so Kubernetes pulls `:latest` and untagged images on every step. The finalizer container is not affected. An invalid value fails operator startup. | `HadesScheduler/HadesOperator/cmd/main.go` (`OperatorConfig`) |
 | `DEV_MODE` | `false` | Enable the controller-runtime development logger. | `HadesScheduler/HadesOperator/cmd/main.go` |
 
 Plus the [NATS](#nats-connection-all-components) variables (the operator publishes status/log events). The operator also accepts standard controller-runtime **flags**: `--health-probe-bind-address` (default `:8083`), `--metrics-bind-address` (default `:8082`, set `0` to disable), `--leader-elect`, and the log flags bound via `opts.BindFlags`.
@@ -141,6 +145,7 @@ Deployed by the Helm chart (`hades-log-manager`); also run locally via `make run
 | `LOG_BATCH_SIZE` | `100` | Log entries buffered before a flush. | `HadesLogManager/processor.go` (`AggregatorConfig`) |
 | `LOG_RETENTION` | `1h` | How long completed-job logs are kept in memory (Go duration). | `HadesLogManager/processor.go` |
 | `MAX_JOB_LOGS` | `1000` | Max log entries retained per job. | `HadesLogManager/processor.go` |
+| `LOG_WATCHER_MAX_LIFETIME` | `6h` | Longest a job's log watcher lives without seeing a terminal status, for jobs without `timeout_seconds` (jobs with one use it plus 10m). On expiry the watcher just stops, so a missed status event cannot leak it; the terminal status then replays the full log from JetStream before forwarding it. | `HadesLogManager/log_subscriber.go` |
 | `STATUS_WEBHOOK_ENABLED` | `true` | Deliver the job-status webhook. Inert for jobs without a `status_callback_url`. | `HadesLogManager/status_webhook.go` (`StatusWebhookConfig`) |
 | `STATUS_WEBHOOK_MAX_ATTEMPTS` | `6` | Delivery attempts per job before the status event is dropped. | `HadesLogManager/status_webhook.go` |
 | `STATUS_WEBHOOK_TIMEOUT` | `10s` | Bound on a single delivery, including the callback-URL lookup. | `HadesLogManager/status_webhook.go` |

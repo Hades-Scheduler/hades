@@ -76,7 +76,7 @@ func TestStopWatchingDrainsAllContainerLogsBeforeCompletion(t *testing.T) {
 	require.NoError(t, err, "create log consumer")
 
 	// nil resolver: SendJobLogs is a no-op, we assert on the in-memory store.
-	aggregator := NewLogAggregator(ctx, consumer, nil, AggregatorConfig{
+	aggregator := NewLogAggregator(ctx, consumer, nil, nil, AggregatorConfig{
 		BatchSize:  100,
 		Retention:  time.Hour,
 		MaxJobLogs: 1000,
@@ -87,6 +87,7 @@ func TestStopWatchingDrainsAllContainerLogsBeforeCompletion(t *testing.T) {
 		logConsumer:   consumer,
 		logAggregator: aggregator,
 		watchers:      make(map[string]watcherState),
+		finalized:     make(map[string]time.Time),
 	}
 
 	const jobID = "race-job"
@@ -132,30 +133,55 @@ func TestStopWatchingDrainsAllContainerLogsBeforeCompletion(t *testing.T) {
 	}
 }
 
-// TestStopWatchingWithoutWatcherIsNoop guards the case where a terminal status arrives
-// for a job that was never running: stopWatchingJobLogs must not panic or block.
-func TestStopWatchingWithoutWatcherIsNoop(t *testing.T) {
-	dlm := &DynamicLogManager{
-		watchers: make(map[string]watcherState),
-	}
+// TestTerminalWithoutWatcherReplaysOnce covers a terminal status for a job with no
+// watcher (its Running was missed, or this process started mid-job): the logs are
+// replayed from JetStream and forwarded exactly once, without blocking the caller.
+func TestTerminalWithoutWatcherReplaysOnce(t *testing.T) {
+	agg := newRecordingAggregator()
+	dlm := newTestDLM(agg, &fakeLogConsumer{}, nil, time.Hour)
+	ctx := context.Background()
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		dlm.stopWatchingJobLogs(context.Background(), "unknown-job")
+		dlm.handleJobSucceeded(ctx, "missed-running")
+		dlm.handleJobSucceeded(ctx, "missed-running")
 	}()
-
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("stopWatchingJobLogs blocked for an unknown job")
+		t.Fatal("terminal handling blocked for a job without a watcher")
 	}
+	dlm.sendWG.Wait()
+
+	events := agg.snapshot()
+	require.Equal(t, 1, count(events, "sent:missed-running"), "a duplicate terminal must not resend")
+	require.Less(t, slices.Index(events, "add:missed-running"), slices.Index(events, "sent:missed-running"),
+		"the replay must finish before forwarding")
 }
 
-// recordingAggregator records the order of completion calls and otherwise does nothing.
+// A job that never ran (e.g. it failed while queued) has nothing in the stream,
+// so nothing is forwarded for it.
+func TestTerminalForJobThatNeverRanSendsNothing(t *testing.T) {
+	agg := newRecordingAggregator()
+	dlm := newTestDLM(agg, &fakeLogConsumer{noLogs: true}, nil, time.Hour)
+
+	dlm.handleJobFailed(context.Background(), "never-ran")
+	dlm.sendWG.Wait()
+	require.Contains(t, agg.snapshot(), "completed:never-ran")
+	require.NotContains(t, agg.snapshot(), "sent:never-ran")
+}
+
+// recordingAggregator records the order of calls and remembers which jobs have
+// logs, so the "nothing to forward" check sees what the watchers added.
 type recordingAggregator struct {
-	mu     sync.Mutex
-	events []string
+	mu      sync.Mutex
+	events  []string
+	hasLogs map[string]bool
+}
+
+func newRecordingAggregator() *recordingAggregator {
+	return &recordingAggregator{hasLogs: make(map[string]bool)}
 }
 
 func (r *recordingAggregator) record(e string) {
@@ -170,10 +196,33 @@ func (r *recordingAggregator) snapshot() []string {
 	return append([]string(nil), r.events...)
 }
 
-func (r *recordingAggregator) AddLog(buildlogs.Log)              {}
-func (r *recordingAggregator) FlushJob(string) error             { return nil }
-func (r *recordingAggregator) GetJobLogs(string) []buildlogs.Log { return nil }
-func (r *recordingAggregator) GetAllJobs() []string              { return nil }
+func (r *recordingAggregator) AddLog(l buildlogs.Log) {
+	r.record("add:" + l.JobID)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hasLogs != nil {
+		r.hasLogs[l.JobID] = true
+	}
+}
+func (r *recordingAggregator) ResetJobLogs(id string) {
+	r.record("reset:" + id)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.hasLogs, id)
+}
+func (r *recordingAggregator) PrefetchJob(context.Context, string) (logTarget, bool) {
+	return logTarget{}, false
+}
+func (r *recordingAggregator) FlushJob(string) error { return nil }
+func (r *recordingAggregator) GetJobLogs(id string) []buildlogs.Log {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hasLogs[id] {
+		return []buildlogs.Log{{JobID: id, ContainerID: "c"}}
+	}
+	return nil
+}
+func (r *recordingAggregator) GetAllJobs() []string { return nil }
 func (r *recordingAggregator) UpdateJobStatus(id string, s buildstatus.JobStatus) {
 	r.record("status:" + id + ":" + string(s))
 }
@@ -189,10 +238,11 @@ func (r *recordingAggregator) SendJobLogs(_ context.Context, id string) error {
 // TestSlowDrainDoesNotBlockOtherJobs holds job A's drain open and checks that job B
 // still gets completed and forwarded. A's logs must only go out after its drain ends.
 func TestSlowDrainDoesNotBlockOtherJobs(t *testing.T) {
-	agg := &recordingAggregator{}
+	agg := newRecordingAggregator()
 	dlm := &DynamicLogManager{
 		logAggregator: agg,
 		watchers:      make(map[string]watcherState),
+		finalized:     make(map[string]time.Time),
 	}
 
 	newWatcher := func() (watcherState, *sync.WaitGroup) {
@@ -248,4 +298,230 @@ func count(s []string, v string) int {
 		}
 	}
 	return n
+}
+
+// fakeLogConsumer stands in for the JetStream watcher: on drain it delivers one
+// log (the job's stored backlog) unless noLogs is set, and returns. On cancel it
+// returns only once release is closed (if set), to model a slow teardown.
+type fakeLogConsumer struct {
+	release chan struct{}
+	noLogs  bool
+}
+
+func (f *fakeLogConsumer) WatchJobLogs(ctx context.Context, jobID string, drain <-chan struct{}, handler func(buildlogs.Log)) error {
+	select {
+	case <-drain:
+		if !f.noLogs {
+			handler(buildlogs.Log{JobID: jobID, ContainerID: "c"})
+		}
+		return nil
+	case <-ctx.Done():
+		if f.release != nil {
+			<-f.release
+		}
+		return ctx.Err()
+	}
+}
+
+func newTestDLM(agg watchedAggregator, consumer buildlogs.LogConsumer, nc *nats.Conn, maxLifetime time.Duration) *DynamicLogManager {
+	return NewDynamicLogManager(nc, consumer, agg, LogWatcherConfig{MaxLifetime: maxLifetime}).(*DynamicLogManager)
+}
+
+// A fast job publishes Running and its terminal status back to back. Both must
+// be handled in that order, or the watcher started by a late Running is never
+// stopped and the job's logs are never forwarded.
+func TestStatusEventsKeepPerJobOrder(t *testing.T) {
+	nc := startNATS(t)
+	agg := newRecordingAggregator()
+	dlm := newTestDLM(agg, &fakeLogConsumer{}, nc, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	listening := make(chan error, 1)
+	go func() { listening <- dlm.StartListening(ctx) }()
+	// The subscription is registered asynchronously; a flush round-trip after a
+	// short pause makes sure it exists before publishing.
+	time.Sleep(200 * time.Millisecond)
+	require.NoError(t, nc.Flush())
+
+	const jobs = 50
+	for i := range jobs {
+		id := fmt.Sprintf("job-%d", i)
+		require.NoError(t, nc.Publish(buildstatus.StatusSubject(buildstatus.StatusRunning), []byte(id)))
+		require.NoError(t, nc.Publish(buildstatus.StatusSubject(buildstatus.StatusSucceeded), []byte(id)))
+	}
+	require.NoError(t, nc.Flush())
+
+	require.Eventually(t, func() bool {
+		n := 0
+		for _, e := range agg.snapshot() {
+			if len(e) > 5 && e[:5] == "sent:" {
+				n++
+			}
+		}
+		return n == jobs
+	}, 10*time.Second, 10*time.Millisecond, "every job must be forwarded")
+
+	events := agg.snapshot()
+	for i := range jobs {
+		id := fmt.Sprintf("job-%d", i)
+		running := slices.Index(events, "status:"+id+":"+string(buildstatus.StatusRunning))
+		succeeded := slices.Index(events, "status:"+id+":"+string(buildstatus.StatusSucceeded))
+		require.Less(t, running, succeeded, "Running must be handled before Succeeded for %s", id)
+	}
+	dlm.mu.RLock()
+	require.Empty(t, dlm.watchers, "no watcher may outlive its job")
+	dlm.mu.RUnlock()
+
+	cancel()
+	require.NoError(t, <-listening)
+}
+
+// A watcher that outlives its lifetime is stopped, but the job may still be
+// running: nothing may be forwarded or completed until its terminal status,
+// which then replays the full log and forwards it exactly once.
+func TestWatcherExpiryDefersForwardToTerminal(t *testing.T) {
+	agg := newRecordingAggregator()
+	dlm := newTestDLM(agg, &fakeLogConsumer{}, nil, 50*time.Millisecond)
+	ctx := context.Background()
+
+	dlm.handleJobRunning(ctx, "long-job")
+	require.Eventually(t, func() bool {
+		dlm.mu.RLock()
+		defer dlm.mu.RUnlock()
+		return len(dlm.watchers) == 0
+	}, 5*time.Second, 10*time.Millisecond, "the expired watcher must stop")
+	require.NotContains(t, agg.snapshot(), "completed:long-job", "an expired job is not complete")
+	require.NotContains(t, agg.snapshot(), "sent:long-job", "an expired watcher must not forward partial logs")
+
+	dlm.handleJobSucceeded(ctx, "long-job")
+	dlm.sendWG.Wait()
+	events := agg.snapshot()
+	require.Equal(t, 1, count(events, "sent:long-job"))
+	require.Less(t, slices.Index(events, "reset:long-job"), slices.Index(events, "add:long-job"),
+		"partial logs are dropped before the replay")
+	require.Less(t, slices.Index(events, "add:long-job"), slices.Index(events, "sent:long-job"))
+}
+
+// A terminal status that arrives while the expired watcher is still winding
+// down must still take the replay path, not drain the cancelled watcher.
+func TestTerminalForExpiringWatcherReplays(t *testing.T) {
+	release := make(chan struct{})
+	agg := newRecordingAggregator()
+	dlm := newTestDLM(agg, &fakeLogConsumer{release: release}, nil, time.Hour)
+	ctx := context.Background()
+
+	dlm.handleJobRunning(ctx, "job")
+	dlm.mu.RLock()
+	w := dlm.watchers["job"]
+	dlm.mu.RUnlock()
+	dlm.expireWatcher("job", w.drain, time.Hour)
+
+	dlm.handleJobSucceeded(ctx, "job")
+	require.NotContains(t, agg.snapshot(), "sent:job", "must wait for the expired watcher to finish")
+	close(release)
+	dlm.sendWG.Wait()
+
+	events := agg.snapshot()
+	require.Equal(t, 1, count(events, "sent:job"))
+	require.Contains(t, events, "reset:job")
+}
+
+// The normal path drains the live watcher and does not replay.
+func TestTerminalWithLiveWatcherDoesNotReplay(t *testing.T) {
+	agg := newRecordingAggregator()
+	dlm := newTestDLM(agg, &fakeLogConsumer{}, nil, time.Hour)
+	ctx := context.Background()
+
+	dlm.handleJobRunning(ctx, "job")
+	dlm.handleJobSucceeded(ctx, "job")
+	dlm.sendWG.Wait()
+
+	events := agg.snapshot()
+	require.Equal(t, 1, count(events, "add:job"), "logs are read once, by the live watcher")
+	// The only reset is the watcher's own, before it reads; a replay would add a
+	// second one after the drain.
+	require.Equal(t, 1, count(events, "reset:job"))
+	require.Less(t, slices.Index(events, "reset:job"), slices.Index(events, "add:job"))
+	require.Equal(t, 1, count(events, "sent:job"))
+}
+
+// A Running for an already forwarded job (a redelivery) re-reads the subject
+// from the start, so the previous run's aggregated logs must be dropped first.
+func TestRunningAfterTerminalResetsLogs(t *testing.T) {
+	agg := newRecordingAggregator()
+	dlm := newTestDLM(agg, &fakeLogConsumer{}, nil, time.Hour)
+	ctx := context.Background()
+
+	dlm.handleJobRunning(ctx, "job")
+	dlm.handleJobSucceeded(ctx, "job")
+	dlm.sendWG.Wait()
+
+	dlm.handleJobRunning(ctx, "job")
+	dlm.handleJobSucceeded(ctx, "job")
+	dlm.sendWG.Wait()
+
+	events := agg.snapshot()
+	require.Equal(t, 2, count(events, "reset:job"))
+	require.Equal(t, 2, count(events, "sent:job"))
+}
+
+// The lifetime timer of a replaced watcher must not stop its replacement.
+func TestExpiredWatcherDoesNotStopReplacement(t *testing.T) {
+	agg := newRecordingAggregator()
+	dlm := newTestDLM(agg, &fakeLogConsumer{}, nil, time.Hour)
+	ctx := context.Background()
+
+	dlm.handleJobRunning(ctx, "job")
+	dlm.mu.RLock()
+	first := dlm.watchers["job"]
+	dlm.mu.RUnlock()
+
+	dlm.handleJobRunning(ctx, "job")
+	dlm.expireWatcher("job", first.drain, time.Hour)
+
+	dlm.mu.RLock()
+	current, stillWatched := dlm.watchers["job"]
+	dlm.mu.RUnlock()
+	require.True(t, stillWatched)
+	require.False(t, current.expired, "the replacement must not be expired")
+	require.NotContains(t, agg.snapshot(), "sent:job")
+
+	dlm.handleJobSucceeded(ctx, "job")
+	dlm.sendWG.Wait()
+	require.Equal(t, 1, count(agg.snapshot(), "sent:job"))
+}
+
+func TestWatcherLifetime(t *testing.T) {
+	require.Equal(t, 6*time.Hour, watcherLifetime(0, 6*time.Hour), "no timeout falls back to the ceiling")
+	require.Equal(t, 90*time.Second+watcherLifetimeSlack, watcherLifetime(90, 6*time.Hour))
+	require.Equal(t, staleJobTTL, watcherLifetime(1<<62, 6*time.Hour), "huge timeouts must not overflow")
+}
+
+// A redelivered Running replaces the job's watcher. Waiting for the old one to
+// wind down must not block the status subscription, which serves every job.
+func TestReplacingWatcherDoesNotBlockCaller(t *testing.T) {
+	release := make(chan struct{})
+	agg := newRecordingAggregator()
+	dlm := newTestDLM(agg, &fakeLogConsumer{release: release}, nil, time.Hour)
+	ctx := context.Background()
+
+	dlm.handleJobRunning(ctx, "job")
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		dlm.handleJobRunning(ctx, "job")
+		dlm.handleJobRunning(ctx, "other")
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("replacing a watcher blocked the caller")
+	}
+
+	close(release)
+	dlm.handleJobSucceeded(ctx, "job")
+	dlm.handleJobSucceeded(ctx, "other")
+	dlm.sendWG.Wait()
+	require.Equal(t, 1, count(agg.snapshot(), "sent:job"))
+	require.Equal(t, 1, count(agg.snapshot(), "sent:other"))
 }

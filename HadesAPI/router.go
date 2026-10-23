@@ -246,7 +246,11 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 	// Stamp the server-side submission time so queue_wait (submit -> scheduler
 	// dequeue) is measured against a trusted clock rather than a client value.
 	p.QueuePayload.Timestamp = time.Now()
-	slog.Debug("Received build request ", "payload", SafePayloadFormat(p.QueuePayload))
+	// SafePayloadFormat deep-copies and marshals the whole payload, scripts
+	// included, so only pay for it when the line is actually emitted.
+	if slog.Default().Enabled(c.Request.Context(), slog.LevelDebug) {
+		slog.Debug("Received build request ", "payload", SafePayloadFormat(p.QueuePayload))
+	}
 
 	queuePrio := hades.PriorityFromInt(p.Priority)
 

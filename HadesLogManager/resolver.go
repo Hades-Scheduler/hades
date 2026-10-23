@@ -6,13 +6,20 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/hades-scheduler/hades/shared/payload"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// jobCallbackResolver resolves the per-job callback URL for a given job ID.
+// logTarget is the subset of a stored job payload the log path needs: where to
+// forward the aggregated logs and how long the job may run, which bounds how long
+// its log watcher is kept alive.
+type logTarget struct {
+	CallbackURL    string
+	TimeoutSeconds int64
+}
+
+// jobCallbackResolver resolves the log-forwarding target for a given job ID.
 type jobCallbackResolver interface {
-	CallbackURL(ctx context.Context, jobID string) (string, error)
+	LogTarget(ctx context.Context, jobID string) (logTarget, error)
 }
 
 // jobInfo is the subset of a stored job payload the status webhook needs.
@@ -44,16 +51,16 @@ func newKVCallbackResolver(kv jetstream.KeyValue) *kvCallbackResolver {
 	return &kvCallbackResolver{kv: kv}
 }
 
-// CallbackURL returns the callback URL stored on the job payload for jobID.
-// A missing key or bucket yields ("", nil) so callers treat it as "no callback
-// configured" rather than an error. Read or unmarshal failures are returned as
-// errors.
-func (r *kvCallbackResolver) CallbackURL(ctx context.Context, jobID string) (string, error) {
+// LogTarget returns the callback URL and timeout stored on the job payload for
+// jobID. A missing key or bucket yields a zero logTarget and no error so callers
+// treat it as "no callback configured" rather than an error. Read or unmarshal
+// failures are returned as errors.
+func (r *kvCallbackResolver) LogTarget(ctx context.Context, jobID string) (logTarget, error) {
 	job, found, err := r.load(ctx, jobID)
 	if err != nil || !found {
-		return "", err
+		return logTarget{}, err
 	}
-	return job.CallbackURL, nil
+	return logTarget{CallbackURL: job.CallbackURL, TimeoutSeconds: job.TimeoutSeconds}, nil
 }
 
 // JobInfo returns the job name and status-callback URL stored for jobID. A
@@ -67,10 +74,20 @@ func (r *kvCallbackResolver) JobInfo(ctx context.Context, jobID string) (jobInfo
 	return jobInfo{Found: true, Name: job.Name, StatusCallbackURL: job.StatusCallbackURL}, nil
 }
 
+// storedJob mirrors the few payload.QueuePayload fields this service reads.
+// Decoding into it skips the steps, scripts and metadata maps, which make up
+// nearly all of a payload and are never needed here.
+type storedJob struct {
+	Name              string `json:"name"`
+	CallbackURL       string `json:"callback_url"`
+	StatusCallbackURL string `json:"status_callback_url"`
+	TimeoutSeconds    int64  `json:"timeout_seconds"`
+}
+
 // load reads and decodes the job payload stored under jobID. A missing key or
 // bucket is reported as (zero, false, nil); read or decode failures are errors.
-func (r *kvCallbackResolver) load(ctx context.Context, jobID string) (payload.QueuePayload, bool, error) {
-	var job payload.QueuePayload
+func (r *kvCallbackResolver) load(ctx context.Context, jobID string) (storedJob, bool, error) {
+	var job storedJob
 
 	entry, err := r.kv.Get(ctx, jobID)
 	if err != nil {

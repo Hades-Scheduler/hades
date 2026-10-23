@@ -21,6 +21,12 @@ const (
 	// non-positive retention would otherwise make completed jobs eligible for
 	// flushing immediately.
 	defaultRetention = time.Hour
+	// staleJobTTL evicts jobs that never reached a terminal status (a lost
+	// terminal event, or a job seen only as Queued). It matches the queue
+	// retention, so a job seen only as Queued for that long can no longer start.
+	// A job still running past it loses only its in-memory copy: its terminal
+	// status replays the logs from JetStream.
+	staleJobTTL = 24 * time.Hour
 )
 
 // NATSLogAggregator implements LogAggregator using in-memory storage for fast log retrieval.
@@ -31,8 +37,17 @@ type NATSLogAggregator struct {
 	resolver  jobCallbackResolver
 	logs      sync.Map // jobID (string) -> logsVersion
 	completed sync.Map // jobID (string) -> time.Time (completion time)
-	status    sync.Map // jobID (string) -> buildstatus.JobStatus
+	status    sync.Map // jobID (string) -> statusEntry
+	targets   sync.Map // jobID (string) -> logTarget, resolved when the watcher starts
+	client    *http.Client
 	cfg       AggregatorConfig
+}
+
+// statusEntry records when a status was last set so jobs that never complete
+// can still be swept.
+type statusEntry struct {
+	status    buildstatus.JobStatus
+	updatedAt time.Time
 }
 
 // wrapper stored in sync.Map: comparable (uint64 + pointer)
@@ -55,11 +70,12 @@ type AggregatorConfig struct {
 //   - ctx: Context for controlling the lifecycle of background goroutines
 //   - hlc: HadesLogConsumer instance (currently unused but kept for future extensibility)
 //   - resolver: resolves the per-job callback URL used when forwarding logs; may be nil
+//   - client: HTTP client for the log callback; nil uses one with httpClientTimeout
 //   - config: AggregatorConfig containing batching and limit settings
 //
 // Returns:
 //   - LogAggregator: A new instance ready to aggregate logs
-func NewLogAggregator(ctx context.Context, hlc *buildlogs.HadesLogConsumer, resolver jobCallbackResolver, config AggregatorConfig) buildlogs.LogAggregator {
+func NewLogAggregator(ctx context.Context, hlc *buildlogs.HadesLogConsumer, resolver jobCallbackResolver, client *http.Client, config AggregatorConfig) *NATSLogAggregator {
 	// Normalize retention once so every downstream use (cleanup cadence and the
 	// expiry comparison) works from a single, guaranteed-positive value.
 	if config.Retention <= 0 {
@@ -68,9 +84,14 @@ func NewLogAggregator(ctx context.Context, hlc *buildlogs.HadesLogConsumer, reso
 		config.Retention = defaultRetention
 	}
 
+	if client == nil {
+		client = &http.Client{Timeout: httpClientTimeout}
+	}
+
 	la := &NATSLogAggregator{
 		hlc:      hlc,
 		resolver: resolver,
+		client:   client,
 		cfg:      config,
 	}
 
@@ -80,11 +101,11 @@ func NewLogAggregator(ctx context.Context, hlc *buildlogs.HadesLogConsumer, reso
 	return la
 }
 
-// cleanupLoop runs periodic cleanup of completed jobs. It ticks at the
-// configured retention interval (floored at one minute) so that completed jobs
-// are flushed within roughly one retention period of expiring.
+// cleanupLoop runs periodic cleanup of completed jobs. It ticks at a quarter of
+// the retention (floored at one minute): ticking once per retention would let an
+// entry that expired just after a tick live for almost two retention periods.
 func (la *NATSLogAggregator) cleanupLoop(ctx context.Context) {
-	interval := la.cfg.Retention
+	interval := la.cfg.Retention / 4
 	if interval < time.Minute {
 		interval = time.Minute
 	}
@@ -98,6 +119,7 @@ func (la *NATSLogAggregator) cleanupLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			la.cleanupCompletedJobs()
+			la.cleanupStaleJobs(time.Now())
 		}
 	}
 }
@@ -130,9 +152,13 @@ func (la *NATSLogAggregator) AddLog(log buildlogs.Log) {
 
 	slog.Debug("Adding log to aggregator", "job_id", log.JobID, "container_id", log.ContainerID, "entries", len(log.Logs))
 
-	// Use LoadOrStore and CompareAndSwap for thread-safe updates
+	// Use LoadOrStore and CompareAndSwap for thread-safe updates. Load first so
+	// the empty placeholder is only allocated for a job's very first log.
 	for {
-		value, _ := la.logs.LoadOrStore(log.JobID, logsVersion{ver: 0, ptr: &[]buildlogs.Log{}})
+		value, ok := la.logs.Load(log.JobID)
+		if !ok {
+			value, _ = la.logs.LoadOrStore(log.JobID, logsVersion{ver: 0, ptr: &[]buildlogs.Log{}})
+		}
 		old := value.(logsVersion)
 		existing := *old.ptr
 
@@ -214,7 +240,17 @@ func (la *NATSLogAggregator) FlushJob(jobID string) error {
 	}
 
 	la.completed.Delete(jobID)
+	la.targets.Delete(jobID)
 	return nil
+}
+
+// ResetJobLogs drops the aggregated logs of jobID ahead of a watcher that
+// re-reads the job's log subject from the start. It also clears the completion
+// mark, since a job that is watched again is running and the retention sweep
+// would otherwise flush it mid-run.
+func (la *NATSLogAggregator) ResetJobLogs(jobID string) {
+	la.logs.Delete(jobID)
+	la.completed.Delete(jobID)
 }
 
 // MarkJobCompleted marks a job as completed and schedules it for cleanup after retention period.
@@ -250,6 +286,46 @@ func (la *NATSLogAggregator) cleanupCompletedJobs() {
 	}
 }
 
+// cleanupStaleJobs flushes jobs that were never marked completed and whose status
+// has not changed for staleJobTTL, so a lost terminal event cannot pin a job in
+// memory forever. Completed jobs are left to the retention sweep.
+func (la *NATSLogAggregator) cleanupStaleJobs(now time.Time) {
+	cutoff := now.Add(-staleJobTTL)
+	cleaned := 0
+	la.status.Range(func(key, value any) bool {
+		jobID := key.(string)
+		if _, done := la.completed.Load(jobID); done {
+			return true
+		}
+		if value.(statusEntry).updatedAt.Before(cutoff) {
+			_ = la.FlushJob(jobID)
+			cleaned++
+		}
+		return true
+	})
+	if cleaned > 0 {
+		slog.Warn("Flushed jobs that never completed", "count", cleaned, "ttl", staleJobTTL)
+	}
+}
+
+// PrefetchJob resolves and caches the job's log target so the KV lookup runs
+// while the job executes instead of between its terminal status and the log
+// callback. A failed lookup is not cached; SendJobLogs then retries it.
+func (la *NATSLogAggregator) PrefetchJob(ctx context.Context, jobID string) (logTarget, bool) {
+	if la.resolver == nil {
+		return logTarget{}, false
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, httpClientTimeout)
+	defer cancel()
+	target, err := la.resolver.LogTarget(lookupCtx, jobID)
+	if err != nil {
+		slog.Debug("Failed to prefetch log target", "job_id", jobID, "error", err)
+		return logTarget{}, false
+	}
+	la.targets.Store(jobID, target)
+	return target, true
+}
+
 // SendJobLogs retrieves all stored logs for jobID and POSTs them as JSON to the
 // job's own callback URL, resolved from the job payload. Forwarding is per-job:
 // if the job has no callback URL (or it cannot be resolved/validated), the call
@@ -268,10 +344,16 @@ func (la *NATSLogAggregator) SendJobLogs(ctx context.Context, jobID string) erro
 		return nil
 	}
 
-	endpoint, err := la.resolver.CallbackURL(sendCtx, jobID)
-	if err != nil {
-		slog.Warn("Failed to resolve callback URL, skipping log forwarding", "job_id", jobID, "error", err)
-		return nil
+	var endpoint string
+	if cached, ok := la.targets.Load(jobID); ok {
+		endpoint = cached.(logTarget).CallbackURL
+	} else {
+		target, err := la.resolver.LogTarget(sendCtx, jobID)
+		if err != nil {
+			slog.Warn("Failed to resolve callback URL, skipping log forwarding", "job_id", jobID, "error", err)
+			return nil
+		}
+		endpoint = target.CallbackURL
 	}
 	if endpoint == "" {
 		slog.Debug("No callback URL for job, skipping log forwarding", "job_id", jobID)
@@ -296,12 +378,11 @@ func (la *NATSLogAggregator) SendJobLogs(ctx context.Context, jobID string) erro
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: httpClientTimeout}
-	resp, err := client.Do(req)
+	resp, err := la.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("sending HTTP request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("callback endpoint returned non-success status %s for job %s", resp.Status, jobID)
@@ -352,7 +433,7 @@ func (la *NATSLogAggregator) GetAllJobs() []string {
 // UpdateJobStatus stores or overwrites the build status for jobID.
 // This method is thread-safe via sync.Map.Store.
 func (la *NATSLogAggregator) UpdateJobStatus(jobID string, status buildstatus.JobStatus) {
-	la.status.Store(jobID, status)
+	la.status.Store(jobID, statusEntry{status: status, updatedAt: time.Now()})
 }
 
 // GetJobStatus returns the string representation of the current build status for jobID.
@@ -362,5 +443,5 @@ func (la *NATSLogAggregator) GetJobStatus(jobID string) (buildstatus.JobStatus, 
 	if !exists {
 		return buildstatus.JobStatus(""), fmt.Errorf("job not found: %s", jobID)
 	}
-	return value.(buildstatus.JobStatus), nil
+	return value.(statusEntry).status, nil
 }

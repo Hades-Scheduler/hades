@@ -46,14 +46,22 @@ stream into a single HTTP payload for that endpoint. Test results travel a
    container's lifetime (flushed on ~50 lines or ~1s). A zero-entry `Log` is published
    when a container starts so a step that produces no output keeps its slot. Status
    changes go to `hades.jobstatus.<status>`.
-3. **LogManager watches, keyed off status.** On `running` it starts a durable
-   JetStream consumer on `hades.logs.<jobID>` and streams batches into the in-memory
-   aggregator, **coalesced per container** (all batches for one `ContainerID` merge
-   into a single `Log`, preserving first-seen container order). On `succeeded`/`failed`
-   it stops watching, marks the job complete, and forwards the logs.
+3. **LogManager watches, keyed off status.** On `running` it starts an ephemeral
+   ordered JetStream consumer on `hades.logs.<jobID>` and streams batches into the
+   in-memory aggregator, **coalesced per container** (all batches for one `ContainerID`
+   merge into a single `Log`, preserving first-seen container order). On
+   `succeeded`/`failed`/`stopped` it drains up to the job's last stored log message,
+   stops watching, marks the job complete, and forwards the logs. A watcher that
+   outlives the job's `timeout_seconds` (plus slack), or `LOG_WATCHER_MAX_LIFETIME`
+   for jobs without one, is stopped without forwarding anything. If the job's
+   `HADES_JOBS` entry can't be read when the watcher starts, the watcher falls back
+   to `LOG_WATCHER_MAX_LIFETIME` too. When a terminal
+   status arrives for a job with no live watcher (expired, a missed `running`, or a
+   restart mid-job), the LogManager replays the job's whole log from JetStream and
+   then forwards it. Each terminal status is forwarded once.
 4. **LogManager forwards to the job's callback URL.** It resolves the job's
-   `callback_url` from the `HADES_JOBS` KV store and POSTs the aggregated
-   `[]buildlogs.Log` there (typically the adapter's `POST /adapter/logs`). Jobs
+   `callback_url` from the `HADES_JOBS` KV store (prefetched when the watcher starts,
+   otherwise looked up at forward time) and POSTs the aggregated `[]buildlogs.Log` there (typically the adapter's `POST /adapter/logs`). Jobs
    without a `callback_url` are not forwarded.
 5. **Adapter stores execution logs.** It takes the execute step (`logs[1]`) as the
    execution logs. Per-container grouping matters here: if all steps were flattened
@@ -74,7 +82,8 @@ stream into a single HTTP payload for that endpoint. Test results travel a
   `hades.logs.<jobID>` (independent of this service).
 - The LogManager is triggered by **job status events**, not a direct call.
 - The forwarding destination is **per job** (`callback_url`), resolved from the
-  `HADES_JOBS` KV store at forward time. A job without a `callback_url` runs and
+  `HADES_JOBS` KV store when the watcher starts, or at forward time if it was not
+  prefetched (replayed jobs, or a failed prefetch). A job without a `callback_url` runs and
   logs fine but its logs are never forwarded.
 - Artemis only receives a result when **both** the build logs and the test results
   land, so a job missing the `result` step will run and log fine but never post to
@@ -219,11 +228,13 @@ live feed - continue to receive every event unchanged.
 | `LOG_BATCH_SIZE`         | `100`    | Log entries buffered before a flush.           |
 | `LOG_RETENTION`          | `1h`     | How long completed job logs are kept in memory.|
 | `MAX_JOB_LOGS`           | `1000`   | Max log entries retained per container of a job (oldest drop first; container slots are never removed). |
+| `LOG_WATCHER_MAX_LIFETIME` | `6h`   | Longest a job's live log watcher runs without a terminal status, for jobs without `timeout_seconds` (jobs with one use it plus 10m). Also used when the job's `HADES_JOBS` entry can't be read. Past it, live logs stop updating; the full log is replayed when the job finishes. |
 | `DEBUG`                  | `false`  | Enable verbose (debug-level) logging.          |
 
 The forwarding destination is no longer a global env var. Each job sets its own
 `callback_url` in the build request; the LogManager reads it from the
-`HADES_JOBS` JetStream KV store when forwarding. Jobs without a `callback_url`
+`HADES_JOBS` JetStream KV store when the job's watcher starts, or when forwarding
+if it was not prefetched. Jobs without a `callback_url`
 are not forwarded.
 
 ### Job-status webhook

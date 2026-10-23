@@ -423,3 +423,95 @@ func TestTrackerSweep(t *testing.T) {
 		t.Fatal("expected finished job to be swept")
 	}
 }
+
+func TestTrackerIdentityIsLookedUpOnce(t *testing.T) {
+	tr := newTracker(time.Hour)
+	tr.enqueue("enqueued", "Named Job", 3, hades.HighPriority)
+	if tr.needsIdentity("enqueued") {
+		t.Fatal("a job recorded at enqueue already has its identity")
+	}
+
+	tr.observe("seen", buildstatus.StatusRunning, "")
+	if !tr.needsIdentity("seen") {
+		t.Fatal("a job learned from a status event needs a lookup")
+	}
+	tr.setIdentity("seen", "From KV", 2)
+	if tr.needsIdentity("seen") {
+		t.Fatal("identity must be remembered after a lookup")
+	}
+	if got, _ := tr.get("seen"); got.Name != "From KV" || got.StepCount != 2 {
+		t.Fatalf("identity not written back: %+v", got)
+	}
+
+	// A definitive miss is remembered too.
+	tr.observe("gone", buildstatus.StatusRunning, "")
+	tr.setIdentity("gone", "", 0)
+	if tr.needsIdentity("gone") {
+		t.Fatal("a missing payload must not be looked up again")
+	}
+}
+
+func TestTrackerStatsSinglePass(t *testing.T) {
+	tr := newTracker(time.Hour)
+	tr.observe("a", buildstatus.StatusRunning, "")
+	tr.observe("a", buildstatus.StatusSucceeded, "")
+	tr.observe("b", buildstatus.StatusQueued, "")
+	tr.observe("c", buildstatus.StatusFailed, "")
+	tr.mu.Lock()
+	tr.jobs["c"].finishedAt = time.Now().Add(-time.Hour)
+	tr.mu.Unlock()
+
+	st := tr.stats(time.Minute)
+	if st.counts["Succeeded"] != 1 || st.counts["Queued"] != 1 || st.counts["Failed"] != 1 {
+		t.Fatalf("unexpected counts: %v", st.counts)
+	}
+	if len(st.durations) != 1 {
+		t.Fatalf("only jobs with a start and finish have a duration, got %v", st.durations)
+	}
+	if st.finishedRecently != 1 {
+		t.Fatalf("finishedRecently = %d, want 1", st.finishedRecently)
+	}
+}
+
+func TestTrackerCapEvictsOldest(t *testing.T) {
+	tr := newTracker(time.Hour)
+	base := time.Now().Add(-time.Hour)
+	tr.mu.Lock()
+	for i := range maxTrackedJobs + 10 {
+		id := strconv.Itoa(i)
+		tr.jobs[id] = &jobRecord{id: id, updatedAt: base.Add(time.Duration(i) * time.Millisecond)}
+	}
+	tr.enforceCapLocked()
+	_, oldest := tr.jobs["0"]
+	_, newest := tr.jobs[strconv.Itoa(maxTrackedJobs+9)]
+	n := len(tr.jobs)
+	tr.mu.Unlock()
+	if n != maxTrackedJobs || oldest || !newest {
+		t.Fatalf("len=%d oldestKept=%v newestKept=%v", n, oldest, newest)
+	}
+}
+
+// Every client receives the same pre-encoded frame, and the raw log bytes pass
+// through unchanged in the shape the SPA parses.
+func TestHubBroadcastsEncodedFrame(t *testing.T) {
+	h := newHub()
+	h.broadcast(event{Type: eventJob}) // no clients: must not panic or block
+	a, b := h.add(), h.add()
+	raw := json.RawMessage(`{"job_id":"j","container_id":"c","logs":[{"timestamp":"2026-01-01T00:00:00Z","message":"hi","output_stream":"stdout"}]}`)
+	h.broadcast(event{Type: eventLog, Log: raw})
+
+	got := <-a
+	if string(got) != string(<-b) {
+		t.Fatal("clients received different frames")
+	}
+	var decoded struct {
+		Type string          `json:"type"`
+		Log  json.RawMessage `json:"log"`
+	}
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("frame is not JSON: %v", err)
+	}
+	if decoded.Type != eventLog || string(decoded.Log) != string(raw) {
+		t.Fatalf("unexpected frame: %s", got)
+	}
+}

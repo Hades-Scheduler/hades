@@ -31,11 +31,14 @@ import (
 
 	hadesnats "github.com/hades-scheduler/hades/shared/nats"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -58,11 +61,12 @@ type NSConfig struct {
 type OperatorConfig struct {
 	DeleteOnComplete bool `env:"DELETE_ON_COMPLETE" envDefault:"true"`
 	MaxParallelism   uint `env:"MAX_PARALLELISM" envDefault:"100"`
-	// RequeueDelay is how often the operator re-reconciles a BuildJob whose Job is
-	// still progressing. The operator watches BuildJobs and the Jobs it owns but
-	// not Pods, so container transitions and job completion are only observed on
-	// these requeues; this value bounds how late a completion is detected.
-	RequeueDelay time.Duration `env:"REQUEUE_DELAY" envDefault:"2s"`
+	// RequeueDelay is the safety resync for a BuildJob whose Job is still
+	// progressing. Pod and log-stream events drive normal progress, so this only
+	// bounds how late the operator notices something those events missed.
+	RequeueDelay time.Duration `env:"REQUEUE_DELAY" envDefault:"15s"`
+	// MaxConcurrentReconciles is how many BuildJobs are reconciled in parallel.
+	MaxConcurrentReconciles int `env:"MAX_CONCURRENT_RECONCILES" envDefault:"8"`
 	// LogDrainTimeout bounds how long a completed BuildJob is held (undeleted) so
 	// Kubernetes can still serve its container logs, before it is deleted anyway.
 	LogDrainTimeout time.Duration `env:"LOG_DRAIN_TIMEOUT" envDefault:"45s"`
@@ -92,6 +96,11 @@ func (c *OperatorConfig) normalize() {
 			Info("REQUEUE_DELAY is not positive; falling back to default", "fallback", controller.DefaultRequeueDelay)
 		c.RequeueDelay = controller.DefaultRequeueDelay
 	}
+	if c.MaxConcurrentReconciles <= 0 {
+		setupLog.WithValues("env", "MAX_CONCURRENT_RECONCILES").
+			Info("MAX_CONCURRENT_RECONCILES is not positive; falling back to default", "fallback", controller.DefaultMaxConcurrentReconciles)
+		c.MaxConcurrentReconciles = controller.DefaultMaxConcurrentReconciles
+	}
 	if c.LogDrainTimeout <= 0 {
 		setupLog.WithValues("env", "LOG_DRAIN_TIMEOUT").
 			Info("LOG_DRAIN_TIMEOUT is not positive; falling back to default", "fallback", controller.DefaultLogDrainTimeout)
@@ -111,6 +120,28 @@ func init() {
 }
 
 const DefaultMaxParallelism = 100
+
+// cacheOptions scopes the informer cache to watchNamespace (all namespaces when
+// empty) and restricts the pod informer to pods the operator created. The
+// operator watches pods to react to container transitions, and an unfiltered
+// pod informer would mirror every pod in scope (cluster-wide: the whole
+// cluster) into memory. Cached pod reads only ever look for labelled pods; the
+// fallback for unlabelled pods of older Jobs and the log reads go through the
+// clientset, which bypasses the cache, so the filter cannot hide a pod from them.
+func cacheOptions(watchNamespace string) cache.Options {
+	opts := cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			// Namespaces is left nil so it inherits DefaultNamespaces below.
+			&corev1.Pod{}: {
+				Label: labels.SelectorFromSet(labels.Set{controller.LabelManagedBy: controller.ManagedByValue}),
+			},
+		},
+	}
+	if watchNamespace != "" {
+		opts.DefaultNamespaces = map[string]cache.Config{watchNamespace: {}}
+	}
+	return opts
+}
 
 // nolint:gocyclo
 func main() {
@@ -167,27 +198,13 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "715d8f3b.hades.tum.de",
+		// Step down right away on shutdown so a rolling update does not stall all
+		// builds for a full LeaseDuration. Safe because main only flushes tracing
+		// after mgr.Start returns and touches no cluster state.
+		LeaderElectionReleaseOnCancel: true,
+		Cache:                         cacheOptions(nsConfig.WatchNamespace),
 	}
 
-	if nsConfig.WatchNamespace != "" {
-		mgrOpts.Cache = cache.Options{
-			DefaultNamespaces: map[string]cache.Config{
-				nsConfig.WatchNamespace: {},
-			},
-		}
-	}
-
-	// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-	// when the Manager ends. This requires the binary to immediately end when the
-	// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-	// speeds up voluntary leader transitions as the new leader don't have to wait
-	// LeaseDuration time first.
-	//
-	// In the default scaffold provided, the program ends immediately after
-	// the manager stops, so would be fine to enable this option. However,
-	// if you are doing or is intended to do any operation such as perform cleanups
-	// after the manager stops then its usage might be unsafe.
-	// LeaderElectionReleaseOnCancel: true,
 	cfg := ctrl.GetConfigOrDie()
 	mgr, err := ctrl.NewManager(cfg, mgrOpts)
 	if err != nil {
@@ -226,6 +243,7 @@ func main() {
 		"delete_on_complete", operatorConfig.DeleteOnComplete,
 		"max_parallelism", operatorConfig.MaxParallelism,
 		"requeue_delay", operatorConfig.RequeueDelay,
+		"max_concurrent_reconciles", operatorConfig.MaxConcurrentReconciles,
 		"log_drain_timeout", operatorConfig.LogDrainTimeout,
 		"finalizer_image", operatorConfig.FinalizerImage,
 		"image_pull_policy", operatorConfig.ImagePullPolicy,
@@ -254,8 +272,7 @@ func main() {
 	}
 
 	if err := (&controller.BuildJobReconciler{
-		Client: mgr.GetClient(),
-		// Uncached reader for admission counting; see BuildJobReconciler.APIReader.
+		Client:           mgr.GetClient(),
 		APIReader:        mgr.GetAPIReader(),
 		Scheme:           mgr.GetScheme(),
 		K8sClient:        kcs,
@@ -267,6 +284,8 @@ func main() {
 		ImagePullPolicy:  pullPolicy,
 		Publisher:        publisher,
 		LogStreams:       controller.NewLogStreamRegistry(),
+
+		MaxConcurrentReconciles: operatorConfig.MaxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BuildJob")
 		os.Exit(1)

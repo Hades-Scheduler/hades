@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,9 @@ type jobRecord struct {
 	startedAt  time.Time
 	finishedAt time.Time
 	updatedAt  time.Time
+	// identityKnown is set once name and step count came from TrackEnqueue or
+	// a KV lookup (including a definitive miss), so the list skips the lookup.
+	identityKnown bool
 }
 
 func (r *jobRecord) dto() JobSummary {
@@ -117,6 +121,7 @@ func (t *tracker) enqueue(jobID, name string, stepCount int, priority hades.Prio
 	rec.name = name
 	rec.priority = priority
 	rec.stepCount = stepCount
+	rec.identityKnown = true
 	if rec.status == "" {
 		rec.status = buildstatus.StatusQueued
 	}
@@ -188,42 +193,61 @@ func (t *tracker) list(statusFilter string) []JobSummary {
 	return out
 }
 
-// counts returns the number of tracked jobs per status string.
-func (t *tracker) counts() map[string]int {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	c := make(map[string]int)
-	for _, rec := range t.jobs {
-		c[rec.status.String()]++
-	}
-	return c
+// trackerStats is the aggregate the metrics snapshot needs from the tracker.
+type trackerStats struct {
+	counts           map[string]int
+	durations        []int64
+	finishedRecently int
 }
 
-// finishedDurations returns completed-job durations in milliseconds.
-func (t *tracker) finishedDurations() []int64 {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	var ds []int64
-	for _, rec := range t.jobs {
-		if !rec.startedAt.IsZero() && !rec.finishedAt.IsZero() {
-			ds = append(ds, rec.finishedAt.Sub(rec.startedAt).Milliseconds())
-		}
-	}
-	return ds
-}
-
-// finishedSince returns how many jobs reached a terminal state within window.
-func (t *tracker) finishedSince(window time.Duration) int {
+// stats returns per-status counts, completed-job durations in milliseconds and
+// how many jobs finished within window, gathered in one pass under one lock.
+func (t *tracker) stats(window time.Duration) trackerStats {
 	cutoff := time.Now().Add(-window)
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	n := 0
+	st := trackerStats{counts: make(map[string]int)}
 	for _, rec := range t.jobs {
-		if !rec.finishedAt.IsZero() && rec.finishedAt.After(cutoff) {
-			n++
+		st.counts[rec.status.String()]++
+		if rec.finishedAt.IsZero() {
+			continue
+		}
+		if !rec.startedAt.IsZero() {
+			st.durations = append(st.durations, rec.finishedAt.Sub(rec.startedAt).Milliseconds())
+		}
+		if rec.finishedAt.After(cutoff) {
+			st.finishedRecently++
 		}
 	}
-	return n
+	return st
+}
+
+// needsIdentity reports whether jobID's name and step count are still unknown
+// and have not been looked up yet.
+func (t *tracker) needsIdentity(jobID string) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	rec, ok := t.jobs[jobID]
+	return ok && !rec.identityKnown
+}
+
+// setIdentity records a job's name and step count learned from its stored
+// payload. It is also called with empty values once a payload is known to be
+// gone, so the job list does not look it up again on every request.
+func (t *tracker) setIdentity(jobID, name string, stepCount int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.jobs[jobID]
+	if !ok {
+		return
+	}
+	rec.identityKnown = true
+	if rec.name == "" {
+		rec.name = name
+	}
+	if rec.stepCount == 0 {
+		rec.stepCount = stepCount
+	}
 }
 
 func (t *tracker) cleanupLoop(ctx context.Context) {
@@ -271,19 +295,22 @@ func (t *tracker) enforceInsertCapLocked() {
 	}
 }
 
-// enforceCapLocked evicts the oldest records while the map exceeds the cap.
-// Caller must hold the write lock.
+// enforceCapLocked evicts the oldest records while the map exceeds the cap. It
+// sorts once rather than rescanning the map per evicted record, which after a
+// burst would be quadratic in the overflow. Caller must hold the write lock.
 func (t *tracker) enforceCapLocked() {
-	for len(t.jobs) > maxTrackedJobs {
-		var oldestID string
-		var oldest time.Time
-		first := true
-		for id, rec := range t.jobs {
-			if first || rec.updatedAt.Before(oldest) {
-				oldestID, oldest, first = id, rec.updatedAt, false
-			}
-		}
-		delete(t.jobs, oldestID)
+	if len(t.jobs) <= maxTrackedJobs {
+		return
+	}
+	recs := make([]*jobRecord, 0, len(t.jobs))
+	for _, rec := range t.jobs {
+		recs = append(recs, rec)
+	}
+	slices.SortFunc(recs, func(a, b *jobRecord) int {
+		return a.updatedAt.Compare(b.updatedAt)
+	})
+	for _, rec := range recs[:len(recs)-maxTrackedJobs] {
+		delete(t.jobs, rec.id)
 	}
 }
 

@@ -28,8 +28,8 @@ const logStreamBuffer = 64
 // write deadline.
 //
 // All writes to the response happen in this one goroutine; the JetStream callback
-// only hands parsed batches to it over a channel, so gin.ResponseWriter is never
-// written concurrently. The consumer is torn down when the client disconnects.
+// only hands batches to it over a channel, so gin.ResponseWriter is never written
+// concurrently. The consumer is torn down when the client disconnects.
 func (s *Server) handleJobLogStream(c *gin.Context) {
 	// Parse the id as a UUID so only a well-formed job id reaches the subject
 	// filter - no user-controlled data flows into NATS.
@@ -70,13 +70,18 @@ func (s *Server) handleJobLogStream(c *gin.Context) {
 		return
 	}
 
-	logs := make(chan buildlogs.Log, logStreamBuffer)
+	logs := make(chan json.RawMessage, logStreamBuffer)
 	consumeCtx, err := cons.Consume(func(msg jetstream.Msg) {
-		var l buildlogs.Log
-		if err := json.Unmarshal(msg.Data(), &l); err != nil {
-			slog.Debug("Failed to unmarshal streamed log", "job_id", parsedID, "error", err)
+		// The stored message is already a JSON-encoded buildlogs.Log, the exact
+		// shape the SPA expects, so it is forwarded without a decode/encode pass.
+		// Marshaling the event compacts it, so a stray newline cannot split the
+		// SSE frame; invalid JSON is dropped here because Marshal would reject
+		// the whole event.
+		if !json.Valid(msg.Data()) {
+			slog.Debug("Skipping malformed streamed log", "job_id", parsedID)
 			return
 		}
+		l := json.RawMessage(msg.Data())
 		// Block only until the client catches up or disconnects; a full buffer
 		// throttles the consumer rather than dropping logs.
 		select {
@@ -105,8 +110,7 @@ func (s *Server) handleJobLogStream(c *gin.Context) {
 		case <-ctx.Done():
 			return
 		case l := <-logs:
-			logCopy := l
-			writeEvent(w, event{Type: eventLog, Log: &logCopy})
+			writeEvent(w, event{Type: eventLog, Log: l})
 			w.Flush()
 		case <-heartbeat.C:
 			if _, err := w.WriteString(": ping\n\n"); err != nil {

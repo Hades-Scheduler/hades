@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"sync"
 
 	"github.com/hades-scheduler/hades/shared/buildlogs"
 	"github.com/hades-scheduler/hades/shared/payload"
@@ -23,6 +24,8 @@ type Job struct {
 	payload.QueuePayload
 	publisher buildlogs.LogPublisher
 	timer     *timing.JobTimer
+	pulls     *pullCoalescer
+	removals  *sync.WaitGroup
 }
 
 type jobIDContextKey string
@@ -43,9 +46,12 @@ func (d Job) execute(ctx context.Context) error {
 			return imagePresentLocally(ctx, d.cli, image)
 		},
 		pull: func(ctx context.Context, image string) error {
-			return pullImages(ctx, d.cli, image)
+			return d.pulls.pull(ctx, image, func(ctx context.Context) error {
+				return pullImages(ctx, d.cli, image)
+			})
 		},
 		record: d.timer.RecordImagePull,
+		recent: d.pulls.recentlyPulled,
 	}
 	pullCtx, cancelPulls := context.WithCancel(ctx)
 	images := puller.prefetch(pullCtx, distinctImages(d.Steps))
@@ -77,6 +83,7 @@ func (d Job) execute(ctx context.Context) error {
 			publisher: d.publisher,
 			timer:     d.timer,
 			image:     images[step.Image],
+			removals:  d.removals,
 		}
 
 		stepCtx := context.WithValue(ctx, jobIDContextKey("job_id"), d.ID.String())

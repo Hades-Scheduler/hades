@@ -76,6 +76,7 @@ Depending on `HADES_EXECUTOR`, the Docker or Kubernetes variables below also app
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon endpoint. |
 | `DOCKER_CONTAINER_AUTOREMOVE` | `false` | Auto-remove step containers after they exit. |
 | `DOCKER_IMAGE_PULL_POLICY` | `always` | Whether a step contacts the registry for an image already present locally: `always`, `if-not-present`, or `never`. `always` is the default and the only safe choice for mutable tags, but it is not free on a cache hit (~2.2s per step for a small image). Use `if-not-present` when images are referenced immutably. |
+| `DOCKER_IMAGE_PULL_FRESHNESS` | `0s` | Under `always`, skip the registry for a present image this scheduler pulled within the window (e.g. `30s`). A moved tag is picked up at most one window late. Concurrent jobs always share one pull of the same image. |
 | `DOCKER_SCRIPT_EXECUTOR` | `/bin/bash -c` | Shell used to run each step's `script`. |
 | `DOCKER_CPU_LIMIT` | | Default CPU limit (whole CPUs) when a step sets none. |
 | `DOCKER_MEMORY_LIMIT` | | Default memory limit (e.g. `4g`) when a step sets none. |
@@ -85,6 +86,7 @@ Depending on `HADES_EXECUTOR`, the Docker or Kubernetes variables below also app
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `K8S_NAMESPACE` | `hades-executor` | Namespace jobs are scheduled into. |
+| `K8S_CLIENT_QPS` / `K8S_CLIENT_BURST` | `50` / `100` | Client-side rate limit for creating BuildJobs. |
 | `BUILDJOB_GROUP` | `build.hades.tum.de` | API group of the `BuildJob` CRD. |
 | `BUILDJOB_VERSION` | `v1` | API version of the `BuildJob` CRD. |
 | `BUILDJOB_RESOURCE` | `buildjobs` | Plural resource name of the `BuildJob` CRD. |
@@ -98,9 +100,11 @@ Only deployed when the scheduler runs in `operator` mode.
 | `WATCH_NAMESPACE` | | Namespace the operator watches (empty = all namespaces, subject to RBAC). |
 | `DELETE_ON_COMPLETE` | `true` | Delete the `BuildJob` CR (and its `Job`) once it finishes. |
 | `MAX_PARALLELISM` | `100` | Maximum concurrent Jobs the operator admits; excess are suspended. |
-| `REQUEUE_DELAY` | `2s` | How often the operator re-reconciles a running `BuildJob` (Go duration). Pods are not watched, so completion is detected on these requeues. A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. |
+| `MAX_CONCURRENT_RECONCILES` | `8` | Number of `BuildJob`s the operator reconciles in parallel. |
+| `REQUEUE_DELAY` | `15s` | Safety resync for a running `BuildJob` (Go duration). Pod, Job and log-stream events drive progress; this only catches a missed event. A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. |
 | `LOG_DRAIN_TIMEOUT` | `45s` | How long a completed `BuildJob` is kept while its container logs drain, before it is deleted anyway (Go duration). A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. |
 | `FINALIZER_IMAGE` | `busybox:1.37.0` | Image for the main container of every `BuildJob` pod; it only runs `sh -c "echo build finished"`. Override for clusters without Docker Hub access. Keep it pinned - an untagged image means `:latest`, which Kubernetes forces to `imagePullPolicy: Always`. |
+| `K8S_IMAGE_PULL_POLICY` | | `imagePullPolicy` for build step containers: `always`, `if-not-present` or `never`. Empty leaves the Kubernetes default. Invalid values fail operator startup. |
 | `DEV_MODE` | `false` | Enable the controller-runtime development logger. |
 
 The operator also accepts standard controller-runtime flags: `--health-probe-bind-address` (default `:8083`), `--metrics-bind-address` (default `:8082`, set `0` to disable), `--leader-elect`, and the log flags.
@@ -116,6 +120,7 @@ Deployed by the Helm chart (`hades-log-manager`); also run locally via `make run
 | `LOG_BATCH_SIZE` | `100` | Log entries buffered before a flush. |
 | `LOG_RETENTION` | `1h` | How long completed-job logs are kept in memory (Go duration). |
 | `MAX_JOB_LOGS` | `1000` | Max log entries retained per job. |
+| `LOG_WATCHER_MAX_LIFETIME` | `6h` | Longest a job's log watcher lives without a terminal status, for jobs without `timeout_seconds`. |
 | `STATUS_WEBHOOK_ENABLED` | `true` | Deliver the [job-status webhook](../usage/submitting-jobs#job-status-webhook). Inert for jobs without a `status_callback_url`. |
 | `STATUS_WEBHOOK_MAX_ATTEMPTS` | `6` | Delivery attempts per job before the status event is dropped. |
 | `STATUS_WEBHOOK_TIMEOUT` | `10s` | Bound on a single delivery, including the callback-URL lookup. |

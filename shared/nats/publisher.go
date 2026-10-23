@@ -51,9 +51,7 @@ func NewHadesPublisher(nc *nats.Conn) (*HadesNATSPublisher, error) {
 	}
 	slog.Info("Created JetStream stream", "stream", s)
 
-	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket: "HADES_JOBS",
-	})
+	kv, err := js.CreateOrUpdateKeyValue(ctx, JobsKVConfig())
 	if err != nil {
 		slog.Error("Failed to create JetStream KeyValue store", "error", err)
 		return nil, err

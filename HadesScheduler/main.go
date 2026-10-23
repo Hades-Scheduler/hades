@@ -105,6 +105,7 @@ func main() {
 			docker.WithCPULimit(dockerCfg.CPULimit),
 			docker.WithMemoryLimit(dockerCfg.MemoryLimit),
 			docker.WithImagePullPolicy(dockerCfg.ImagePullPolicy),
+			docker.WithImagePullFreshness(dockerCfg.ImagePullFreshness),
 			docker.WithLogPublisher(publisher),
 			docker.WithStatusPublisher(publisher),
 		)

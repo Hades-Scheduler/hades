@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// A reconciler built without explicit tuning (as in the existing tests) must keep
-// the historical timings, and a misconfigured non-positive value must not reach
+// A reconciler built without explicit tuning (as most tests build it) must use
+// the defaults, and a misconfigured non-positive value must not reach
 // ctrl.Result.RequeueAfter, where it would requeue immediately and busy-loop.
 func TestReconcilerTuningFallsBackToDefaults(t *testing.T) {
 	tests := []struct {
@@ -50,13 +50,24 @@ func TestReconcilerTuningFallsBackToDefaults(t *testing.T) {
 	}
 }
 
-// The historical hardcoded values are the defaults, so an operator that sets
-// neither env var behaves exactly as before.
-func TestDefaultsMatchHistoricalValues(t *testing.T) {
-	if DefaultRequeueDelay != 2*time.Second {
-		t.Errorf("DefaultRequeueDelay = %v, want 2s", DefaultRequeueDelay)
+// The documented defaults. RequeueDelay is only a safety resync because pod and
+// log-stream events drive progress.
+func TestDefaults(t *testing.T) {
+	if DefaultRequeueDelay != 15*time.Second {
+		t.Errorf("DefaultRequeueDelay = %v, want 15s", DefaultRequeueDelay)
 	}
 	if DefaultLogDrainTimeout != 45*time.Second {
 		t.Errorf("DefaultLogDrainTimeout = %v, want 45s", DefaultLogDrainTimeout)
+	}
+}
+
+func TestMaxConcurrentReconcilesFallsBackToDefault(t *testing.T) {
+	for _, n := range []int{0, -3} {
+		if got := (&BuildJobReconciler{MaxConcurrentReconciles: n}).maxConcurrentReconciles(); got != DefaultMaxConcurrentReconciles {
+			t.Errorf("maxConcurrentReconciles() with %d = %d, want %d", n, got, DefaultMaxConcurrentReconciles)
+		}
+	}
+	if got := (&BuildJobReconciler{MaxConcurrentReconciles: 3}).maxConcurrentReconciles(); got != 3 {
+		t.Errorf("maxConcurrentReconciles() = %d, want 3", got)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	logs "github.com/hades-scheduler/hades/shared/buildlogs"
 )
@@ -147,6 +148,9 @@ func ScanStream(r io.Reader, streamType string, emit func(logs.LogEntry)) error 
 				continue
 			}
 			full = line
+			if len(line) >= maxStreamLineSize {
+				full = trimPartialRune(line)
+			}
 		}
 		if text := strings.TrimSpace(string(full)); text != "" {
 			emit(parseLogLine(text, streamType))
@@ -163,6 +167,20 @@ func ScanStream(r io.Reader, streamType string, emit func(logs.LogEntry)) error 
 
 // maxStreamLineSize caps one streamed log line; the rest of the line is dropped.
 const maxStreamLineSize = 1024 * 1024
+
+// trimPartialRune drops a multi-byte rune that truncation cut short at the end
+// of b, so a capped line is still valid UTF-8.
+func trimPartialRune(b []byte) []byte {
+	for i := len(b) - 1; i >= 0 && i >= len(b)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(b[i]) {
+			if !utf8.FullRune(b[i:]) {
+				return b[:i]
+			}
+			return b
+		}
+	}
+	return b
+}
 
 // parseLogLine parses a single log line into a structured LogEntry.
 // It handles both structured application logs and simple container logs.

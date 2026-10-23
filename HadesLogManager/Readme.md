@@ -58,8 +58,8 @@ stream into a single HTTP payload for that endpoint. Test results travel a
    restart mid-job), the LogManager replays the job's whole log from JetStream and
    then forwards it. Each terminal status is forwarded once.
 4. **LogManager forwards to the job's callback URL.** It resolves the job's
-   `callback_url` from the `HADES_JOBS` KV store when the watcher starts and POSTs the aggregated
-   `[]buildlogs.Log` there (typically the adapter's `POST /adapter/logs`). Jobs
+   `callback_url` from the `HADES_JOBS` KV store (prefetched when the watcher starts,
+   otherwise looked up at forward time) and POSTs the aggregated `[]buildlogs.Log` there (typically the adapter's `POST /adapter/logs`). Jobs
    without a `callback_url` are not forwarded.
 5. **Adapter stores execution logs.** It takes the execute step (`logs[1]`) as the
    execution logs. Per-container grouping matters here: if all steps were flattened
@@ -80,7 +80,8 @@ stream into a single HTTP payload for that endpoint. Test results travel a
   `hades.logs.<jobID>` (independent of this service).
 - The LogManager is triggered by **job status events**, not a direct call.
 - The forwarding destination is **per job** (`callback_url`), resolved from the
-  `HADES_JOBS` KV store at forward time. A job without a `callback_url` runs and
+  `HADES_JOBS` KV store when the watcher starts, or at forward time if it was not
+  prefetched (replayed jobs, or a failed prefetch). A job without a `callback_url` runs and
   logs fine but its logs are never forwarded.
 - Artemis only receives a result when **both** the build logs and the test results
   land, so a job missing the `result` step will run and log fine but never post to
@@ -230,7 +231,8 @@ live feed - continue to receive every event unchanged.
 
 The forwarding destination is no longer a global env var. Each job sets its own
 `callback_url` in the build request; the LogManager reads it from the
-`HADES_JOBS` JetStream KV store when forwarding. Jobs without a `callback_url`
+`HADES_JOBS` JetStream KV store when the job's watcher starts, or when forwarding
+if it was not prefetched. Jobs without a `callback_url`
 are not forwarded.
 
 ### Job-status webhook

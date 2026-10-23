@@ -67,3 +67,11 @@ func TestBuildBuildJobObjectAnnotations(t *testing.T) {
 		assert.Equal(t, job.TraceParent, ann[AnnotationTraceParent])
 	})
 }
+
+func TestNewK8sSchedulerRejectsNonPositiveBurst(t *testing.T) {
+	for _, burst := range []string{"0", "-1"} {
+		t.Setenv("K8S_CLIENT_BURST", burst)
+		_, err := NewK8sScheduler(nil)
+		require.ErrorContains(t, err, "K8S_CLIENT_BURST")
+	}
+}

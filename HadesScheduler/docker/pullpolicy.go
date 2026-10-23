@@ -127,8 +127,18 @@ func (c *pullCoalescer) pull(ctx context.Context, image string, pull func(contex
 			call.err = pull(pullCtx)
 			c.mu.Lock()
 			delete(c.inflight, image)
-			if call.err == nil {
-				c.pulledAt[image] = time.Now()
+			// Only the freshness check reads pulledAt, so without a window
+			// there is nothing to record. Expired entries are pruned here
+			// because per-commit tags and digests would otherwise grow the
+			// map for the lifetime of the scheduler.
+			if call.err == nil && c.freshness > 0 {
+				now := time.Now()
+				for img, at := range c.pulledAt {
+					if now.Sub(at) >= c.freshness {
+						delete(c.pulledAt, img)
+					}
+				}
+				c.pulledAt[image] = now
 			}
 			c.mu.Unlock()
 			close(call.done)

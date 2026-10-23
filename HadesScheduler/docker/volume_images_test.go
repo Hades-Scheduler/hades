@@ -158,3 +158,19 @@ func TestPullCoalescerDoesNotCacheFailures(t *testing.T) {
 	require.False(t, c.recentlyPulled("img"))
 	require.NoError(t, c.pull(context.Background(), "img", func(context.Context) error { return nil }))
 }
+
+func TestPullCoalescerPrunesExpiredPulls(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ok := func(context.Context) error { return nil }
+		c := newPullCoalescer(time.Minute)
+		require.NoError(t, c.pull(context.Background(), "old", ok))
+		time.Sleep(time.Minute)
+		require.NoError(t, c.pull(context.Background(), "new", ok))
+		require.NotContains(t, c.pulledAt, "old")
+		require.Contains(t, c.pulledAt, "new")
+
+		off := newPullCoalescer(0)
+		require.NoError(t, off.pull(context.Background(), "img", ok))
+		require.Empty(t, off.pulledAt, "nothing reads pull times without a freshness window")
+	})
+}

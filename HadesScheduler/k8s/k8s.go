@@ -74,6 +74,12 @@ func NewK8sScheduler(nc *nats.Conn) (*Scheduler, error) {
 	if err := utils.LoadConfig(&k8sCfg); err != nil {
 		return nil, fmt.Errorf("loading Kubernetes config: %w", err)
 	}
+	// client-go silently swaps 0 for its own default of 10, and a negative
+	// burst makes every request fail at the rate limiter, so neither is a
+	// value anyone means.
+	if k8sCfg.ClientBurst < 1 {
+		return nil, fmt.Errorf("invalid K8S_CLIENT_BURST %d: must be at least 1", k8sCfg.ClientBurst)
+	}
 	slog.Debug("Kubernetes config", "namespace", k8sCfg.K8sNamespace)
 
 	slog.Info("Initializing Kubernetes client")

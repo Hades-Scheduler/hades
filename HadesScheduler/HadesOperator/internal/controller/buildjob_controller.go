@@ -720,17 +720,20 @@ func (r *BuildJobReconciler) setStatusCompleted(ctx context.Context, nn types.Na
 		return false, nil
 	}
 
+	// Don't return publish errors. The phase is already saved, so a requeue
+	// stops at the phaseFinal check and never retries the publish, while the
+	// caller would bail out before deleting the CR and admitting the next job.
 	if succeeded {
 		if err := r.Publisher.PublishJobStatus(ctx, buildstatus.StatusSucceeded, jobID); err != nil {
 			slog.Error("Failed to publish job succeeded status", "job_id", jobID, "error", err)
-			return true, err
+			return true, nil
 		}
 		slog.Info("Published job succeeded status", "job_id", jobID)
 		return true, nil
 	}
 	if err := r.Publisher.PublishJobStatus(ctx, buildstatus.StatusFailed, jobID, msg); err != nil {
 		slog.Error("Failed to publish job failed status", "job_id", jobID, "error", err)
-		return true, err
+		return true, nil
 	}
 	slog.Info("Published job failed status", "job_id", jobID)
 	return true, nil

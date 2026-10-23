@@ -53,7 +53,9 @@ stream into a single HTTP payload for that endpoint. Test results travel a
    `succeeded`/`failed`/`stopped` it drains up to the job's last stored log message,
    stops watching, marks the job complete, and forwards the logs. A watcher that
    outlives the job's `timeout_seconds` (plus slack), or `LOG_WATCHER_MAX_LIFETIME`
-   for jobs without one, is stopped without forwarding anything. When a terminal
+   for jobs without one, is stopped without forwarding anything. If the job's
+   `HADES_JOBS` entry can't be read when the watcher starts, the watcher falls back
+   to `LOG_WATCHER_MAX_LIFETIME` too. When a terminal
    status arrives for a job with no live watcher (expired, a missed `running`, or a
    restart mid-job), the LogManager replays the job's whole log from JetStream and
    then forwards it. Each terminal status is forwarded once.
@@ -226,7 +228,7 @@ live feed - continue to receive every event unchanged.
 | `LOG_BATCH_SIZE`         | `100`    | Log entries buffered before a flush.           |
 | `LOG_RETENTION`          | `1h`     | How long completed job logs are kept in memory.|
 | `MAX_JOB_LOGS`           | `1000`   | Max log entries retained per container of a job (oldest drop first; container slots are never removed). |
-| `LOG_WATCHER_MAX_LIFETIME` | `6h`   | Longest a job's live log watcher runs without a terminal status, for jobs without `timeout_seconds` (jobs with one use it plus 10m). Past it, live logs stop updating; the full log is replayed when the job finishes. |
+| `LOG_WATCHER_MAX_LIFETIME` | `6h`   | Longest a job's live log watcher runs without a terminal status, for jobs without `timeout_seconds` (jobs with one use it plus 10m). Also used when the job's `HADES_JOBS` entry can't be read. Past it, live logs stop updating; the full log is replayed when the job finishes. |
 | `DEBUG`                  | `false`  | Enable verbose (debug-level) logging.          |
 
 The forwarding destination is no longer a global env var. Each job sets its own

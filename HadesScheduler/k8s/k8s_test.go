@@ -68,10 +68,16 @@ func TestBuildBuildJobObjectAnnotations(t *testing.T) {
 	})
 }
 
-func TestNewK8sSchedulerRejectsNonPositiveBurst(t *testing.T) {
+func TestNewK8sSchedulerRejectsNonPositiveRateLimits(t *testing.T) {
 	for _, burst := range []string{"0", "-1"} {
 		t.Setenv("K8S_CLIENT_BURST", burst)
 		_, err := NewK8sScheduler(nil)
 		require.ErrorContains(t, err, "K8S_CLIENT_BURST")
+	}
+	t.Setenv("K8S_CLIENT_BURST", "100")
+	for _, qps := range []string{"0", "-1"} {
+		t.Setenv("K8S_CLIENT_QPS", qps)
+		_, err := NewK8sScheduler(nil)
+		require.ErrorContains(t, err, "K8S_CLIENT_QPS")
 	}
 }

@@ -371,6 +371,29 @@ func TestStatusTransitions_DoNotRepublish(t *testing.T) {
 	}
 }
 
+// A failed publish after the phase is saved must not return an error, or the
+// caller skips cleanup and the CR and its Job are left behind.
+func TestSetStatusCompleted_PublishFailureStillReportsChange(t *testing.T) {
+	ctx := context.Background()
+	bj := &buildv1.BuildJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "job-1", Namespace: "ns"},
+		Status:     buildv1.BuildJobStatus{Phase: "Running"},
+	}
+	r := newAdmissionTestReconciler(t, 1)
+	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(bj).WithStatusSubresource(bj).Build()
+	// An empty job ID makes PublishJobStatus fail before it touches NATS.
+	r.Publisher = &log.NATSPublisher{}
+
+	changed, err := r.setStatusCompleted(ctx, client.ObjectKeyFromObject(bj), "", false, "boom")
+	if err != nil || !changed {
+		t.Fatalf("setStatusCompleted() = %v, %v; want true, nil", changed, err)
+	}
+	var got buildv1.BuildJob
+	if err := r.Get(ctx, client.ObjectKeyFromObject(bj), &got); err != nil || got.Status.Phase != "Failed" {
+		t.Fatalf("phase = %q (err %v), want Failed", got.Status.Phase, err)
+	}
+}
+
 func TestDrainGate(t *testing.T) {
 	podIn := func(phase corev1.PodPhase, init ...corev1.ContainerStatus) *corev1.Pod {
 		return &corev1.Pod{Status: corev1.PodStatus{Phase: phase, InitContainerStatuses: init}}

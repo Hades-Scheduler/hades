@@ -8,7 +8,7 @@ Hades is a job scheduler for containerized CI workloads (originally for programm
 
 ## Repo layout
 
-Go workspace (`go.work`, Go 1.26) with five modules:
+Go workspace (`go.work`, Go 1.27) with five modules:
 
 | Module                              | Binary / role                                                                                                                                                                       |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

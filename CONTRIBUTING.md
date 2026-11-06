@@ -4,7 +4,7 @@ Thanks for contributing! This guide covers the Hades-specific workflow. For the 
 
 ## Development setup
 
-Hades is a Go workspace (`go.work`, Go 1.26) with five modules. The top-level [`Makefile`](./Makefile) wraps every common task (`make help` lists them).
+Hades is a Go workspace (`go.work`, Go 1.27) with five modules. The top-level [`Makefile`](./Makefile) wraps every common task (`make help` lists them).
 
 ```bash
 # Run API + scheduler + log manager locally (auto-starts NATS in Docker)

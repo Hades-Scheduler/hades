@@ -109,3 +109,10 @@ compiling. That is a bundler migration, not a security fix.
 - `make vuln` - 0 vulnerabilities in every module.
 - Dashboard: `npm run lint`, `npm test` (33 tests), `npm run build` - pass.
 - Website: `yarn typecheck`, `yarn build` - pass.
+- Test env: `pr-521` deployed via the "Deploy to Kubernetes (test)" workflow
+  (Helm revision 14, all four deployments rolled out). Three jobs submitted
+  through the API behaved as expected: a two-step job sharing `/shared` with
+  env injection succeeded, a failing step marked the job `Failed` without
+  running the next step, and an unpullable image failed fast with
+  `ImagePullBackOff (step 1)`. Auth gates on `/build`, `/api/*` and the Jaeger
+  UI returned 401.

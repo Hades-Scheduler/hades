@@ -5,7 +5,7 @@ SHELL := /usr/bin/env bash
 GO_MODULES := HadesAPI HadesScheduler HadesScheduler/HadesOperator HadesLogManager shared
 GO_PATHS   := $(addsuffix /...,$(addprefix ./,$(GO_MODULES)))
 
-GOLANGCI_LINT_VERSION ?= v2.1.0
+GOLANGCI_LINT_VERSION ?= v2.15.0
 
 COMPOSE      ?= docker compose
 COMPOSE_FILE ?= compose.yml
@@ -136,11 +136,17 @@ fmt: ## Format all Go code.
 .PHONY: lint
 lint: ## Run go vet and golangci-lint across all Go modules.
 	go vet $(GO_PATHS)
-	@GOLANGCI_LINT=$$(command -v golangci-lint || echo "$$(go env GOPATH)/bin/golangci-lint"); \
-	if ! [ -x "$$GOLANGCI_LINT" ]; then \
+	@# Use the pinned linter from PATH or GOPATH/bin; an older one fails typecheck on newer Go.
+	@GOBIN_LINT="$$(go env GOPATH)/bin/golangci-lint"; GOLANGCI_LINT=""; \
+	for c in "$$(command -v golangci-lint)" "$$GOBIN_LINT"; do \
+		if [ -n "$$c" ] && "$$c" version 2>/dev/null | grep -qE "has version v?$(GOLANGCI_LINT_VERSION:v%=%) "; then \
+			GOLANGCI_LINT="$$c"; break; \
+		fi; \
+	done; \
+	if [ -z "$$GOLANGCI_LINT" ]; then \
 		echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..."; \
 		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
-		GOLANGCI_LINT="$$(go env GOPATH)/bin/golangci-lint"; \
+		GOLANGCI_LINT="$$GOBIN_LINT"; \
 	fi; \
 	for m in $(GO_MODULES); do \
 		echo "==> golangci-lint $$m"; \

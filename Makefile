@@ -137,7 +137,7 @@ fmt: ## Format all Go code.
 lint: ## Run go vet and golangci-lint across all Go modules.
 	go vet $(GO_PATHS)
 	@GOLANGCI_LINT=$$(command -v golangci-lint || echo "$$(go env GOPATH)/bin/golangci-lint"); \
-	if ! [ -x "$$GOLANGCI_LINT" ]; then \
+	if ! "$$GOLANGCI_LINT" version 2>/dev/null | grep -qE "has version v?$(GOLANGCI_LINT_VERSION:v%=%) "; then \
 		echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..."; \
 		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
 		GOLANGCI_LINT="$$(go env GOPATH)/bin/golangci-lint"; \

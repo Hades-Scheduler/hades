@@ -5,7 +5,7 @@ SHELL := /usr/bin/env bash
 GO_MODULES := HadesAPI HadesScheduler HadesScheduler/HadesOperator HadesLogManager shared
 GO_PATHS   := $(addsuffix /...,$(addprefix ./,$(GO_MODULES)))
 
-GOLANGCI_LINT_VERSION ?= v2.1.0
+GOLANGCI_LINT_VERSION ?= v2.15.0
 
 COMPOSE      ?= docker compose
 COMPOSE_FILE ?= compose.yml

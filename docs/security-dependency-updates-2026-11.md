@@ -17,6 +17,10 @@ image both stop at 1.27.3), so the bump targets 1.27.3, the latest patch.
   golang.org/x/vuln/cmd/govulncheck@latest`), otherwise it refuses to load
   packages that declare `go 1.27`.
 
+- `GOLANGCI_LINT_VERSION` in the `Makefile`: v2.1.0 → v2.15.0. CI installs
+  that pin, and v2.1.0 predates Go 1.27, so its typecheck fails on every
+  package that declares `go 1.27`.
+
 On 1.27.3 `govulncheck` reports no standard-library vulnerabilities.
 
 ## Go modules

@@ -9,7 +9,7 @@ COPY ./HadesAPI/web ./
 RUN npm run build
 
 # Stage 2: build the Go binary, embedding the built SPA.
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 WORKDIR /app
 
 # Copy go.mod and go.sum files

@@ -20,9 +20,17 @@ The chart is published to GHCR as an OCI artifact. In every command below, repla
 `<version>` with the chart version you want to install (for example `1.0.0`; see the
 [available versions](https://github.com/Hades-Scheduler/hades/pkgs/container/charts%2Fhades)):
 
+Create the API auth Secret first. `/build` then needs Basic Auth with user `hades` and that key. For throwaway test installs only, `--set hadesApi.allowUnauthenticated=true` skips the Secret.
+
+```bash
+kubectl create namespace hades
+kubectl -n hades create secret generic hades-auth --from-literal=AUTH_KEY=<choose-a-key>
+```
+
 ```bash
 helm upgrade --install hades oci://ghcr.io/hades-scheduler/charts/hades \
-  --version <version> -n hades --create-namespace
+  --version <version> -n hades --create-namespace \
+  --set hadesApi.authKeySecret=hades-auth
 ```
 
 ### Option B - From a local checkout
@@ -33,7 +41,7 @@ helm repo add nats https://nats-io.github.io/k8s/helm/charts
 helm dependency build ./helm/hades/
 
 # 2. Install (default: operator mode)
-helm upgrade --install hades ./helm/hades -n hades --create-namespace
+helm upgrade --install hades ./helm/hades -n hades --create-namespace --set hadesApi.authKeySecret=hades-auth
 ```
 
 Override values inline as needed - at minimum set your ingress host:
@@ -41,6 +49,7 @@ Override values inline as needed - at minimum set your ingress host:
 ```bash
 helm upgrade --install hades oci://ghcr.io/hades-scheduler/charts/hades --version <version> \
   -n hades --create-namespace \
+  --set hadesApi.authKeySecret=hades-auth \
   --set ingress.host=hades.example.com \
   --set ingress.tls.secretName=my-tls-secret
 ```
@@ -76,7 +85,8 @@ helm show crds oci://ghcr.io/hades-scheduler/charts/hades --version <version> | 
 ## Upgrade & Rollback
 
 ```bash
-helm upgrade hades oci://ghcr.io/hades-scheduler/charts/hades --version <version> -n hades
+helm upgrade hades oci://ghcr.io/hades-scheduler/charts/hades --version <version> -n hades \
+  --set hadesApi.authKeySecret=hades-auth
 
 # Roll back to a previous revision
 helm history hades -n hades

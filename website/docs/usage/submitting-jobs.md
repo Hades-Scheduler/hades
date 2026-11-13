@@ -57,6 +57,7 @@ http://localhost:8081
 
 ```bash
 curl -X POST http://localhost:8081/build \
+  -u "hades:$AUTH_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Hello World",
@@ -78,6 +79,7 @@ Steps run sequentially. Each step runs in its own container but shares a common 
 
 ```bash
 curl -X POST http://localhost:8081/build \
+  -u "hades:$AUTH_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Multi-Step Example",
@@ -97,6 +99,7 @@ react the moment a job ends - the Artemis integration, a code-review bot - set
 
 ```bash
 curl -X POST http://localhost:8081/build \
+  -u "hades:$AUTH_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Graded Exercise",

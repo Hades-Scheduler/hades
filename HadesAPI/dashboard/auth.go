@@ -103,10 +103,10 @@ func (a *authenticator) reserve(key string) bool {
 	fs := a.failures[key]
 	if fs == nil {
 		if len(a.failures) >= maxFailureEntries {
-			// Hard cap reached (all entries still within the window): refuse to
-			// track new keys rather than grow unbounded. Existing locked-out
-			// keys keep their state.
-			return true
+			// Hard cap reached (all entries still within the window): an attempt
+			// that cannot be counted is refused, otherwise new keys would get
+			// unlimited guesses.
+			return false
 		}
 		fs = &failureState{}
 		a.failures[key] = fs

@@ -332,6 +332,8 @@ tracing:
 
 # -- NetworkPolicies. They need a CNI that enforces NetworkPolicy and are off by
 # default because the NATS policy assumes the labels of the bundled NATS chart.
+# The job-pod policy covers the release namespace only: with
+# `hadesOperator.clusterWide`, BuildJobs created in other namespaces are not covered.
 networkPolicy:
   # -- Render the NetworkPolicies below. Verify the NATS pod labels first
   # (`kubectl get pods -n <ns> --show-labels`), then enable.

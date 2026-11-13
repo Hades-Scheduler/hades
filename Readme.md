@@ -108,10 +108,16 @@ For production deployments, Hades is designed to run natively within a Kubernete
    Replace `<version>` in the commands below with the chart version you want to
    install (for example `1.0.0`).
 
+   Create the API auth Secret first. `/build` then needs Basic Auth with user `hades` and that key. For throwaway test installs only, `--set hadesApi.allowUnauthenticated=true` skips the Secret.
+
    ```fish
+   kubectl create namespace hades
+   kubectl -n hades create secret generic hades-auth --from-literal=AUTH_KEY=<choose-a-key>
+
    # Install the published chart from GHCR (recommended)
    helm upgrade --install hades oci://ghcr.io/hades-scheduler/charts/hades \
-     --version <version> -n hades --create-namespace
+     --version <version> -n hades --create-namespace \
+     --set hadesApi.authKeySecret=hades-auth
    ```
 
    Or install from a local checkout of this repository:
@@ -119,7 +125,7 @@ For production deployments, Hades is designed to run natively within a Kubernete
    ```fish
    helm repo add nats https://nats-io.github.io/k8s/helm/charts
    helm dependency build ./helm/hades/
-   helm upgrade --install hades ./helm/hades -n hades --create-namespace
+   helm upgrade --install hades ./helm/hades -n hades --create-namespace --set hadesApi.authKeySecret=hades-auth
    ```
 
    > **Note:** Helm does not upgrade CRDs after the first install. When a release
@@ -508,7 +514,7 @@ Checklist when cutting a chart release:
    the updated `Chart.lock`. CI vendors the subchart at package time; the
    `charts/` directory itself is not committed.
 5. **Validate before merging**: `helm lint helm/hades`,
-   `helm template helm/hades`, and ideally a throwaway
+   `helm template helm/hades --set hadesApi.authKeySecret=hades-auth`, and ideally a throwaway
    `helm install` in a scratch namespace.
 6. **Package visibility**: the GHCR chart package must be **public** for
    anonymous `helm install` (same as the container images). Set once in the org

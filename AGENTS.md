@@ -47,7 +47,7 @@ make -C HadesScheduler/HadesOperator manifests generate fmt vet test
 # helm chart
 helm dependency build ./helm/hades
 helm lint ./helm/hades
-helm template hades ./helm/hades -n hades
+helm template hades ./helm/hades -n hades --set hadesApi.authKeySecret=hades-auth
 
 # regenerate OpenAPI specs after changing a handler annotation or a request/response DTO
 make docs-api
@@ -67,7 +67,7 @@ The top-level `Makefile` wraps the common workflows (`make help` lists every tar
 
 - **CLI mode:** `make run` runs `HadesAPI`, `HadesScheduler`, and `HadesLogManager` via `go run` and auto-starts NATS in Docker.
 - **Docker mode:** `make docker-run` brings up `hadesAPI` (8081→8080), `hadesScheduler` (docker executor), and `nats` via `compose.yml`. API requests: see `bruno/api/*.bru`.
-- **K8s mode:** `helm upgrade --install hades ./helm/hades -n hades --create-namespace`. The chart deploys API, scheduler, operator, log manager, and embedded NATS JetStream.
+- **K8s mode:** `helm upgrade --install hades ./helm/hades -n hades --create-namespace --set hadesApi.authKeySecret=hades-auth` (create that Secret with key `AUTH_KEY` first; `--set hadesApi.allowUnauthenticated=true` is for throwaway installs only). The chart deploys API, scheduler, operator, log manager, and embedded NATS JetStream.
 
 ## Conventions
 

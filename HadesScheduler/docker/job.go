@@ -70,8 +70,6 @@ func (d Job) execute(ctx context.Context) error {
 	}()
 
 	for _, step := range d.Steps {
-		logStep(d.logger, "Executing step", step)
-
 		// Copy the global envs and add the step specific ones
 		var envs = make(map[string]string)
 		maps.Copy(envs, d.Metadata)
@@ -79,6 +77,7 @@ func (d Job) execute(ctx context.Context) error {
 		envs["UUID"] = d.ID.String()
 		envs["JOB_NAME"] = d.Name
 		step.Metadata = envs
+		logStep(d.logger, "Executing step", step)
 
 		dockerStep := Step{
 			cli:       d.cli,

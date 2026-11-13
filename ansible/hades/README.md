@@ -22,7 +22,7 @@ All variables and their defaults are defined in [`defaults/main.yml`](defaults/m
 | `hades_api_certificate_fullchain_path` | `""` | Path to the TLS fullchain certificate on the API host (enables HTTPS via nginx). |
 | `hades_api_certificate_key_path` | `""` | Path to the TLS private key on the API host. |
 | `hades_nats_url` | `nats://localhost:4222` | NATS URL both components connect to. |
-| `hades_nats_username` / `hades_nats_password` | `""` | NATS credentials. **Required on `api` nodes**: the NATS server there enforces them, and scheduler nodes must use the same values. Port `4222` is published on the API node for the scheduler hosts (restrict it with a firewall to those hosts); the monitor port `8222` is bound to `127.0.0.1`. |
+| `hades_nats_username` / `hades_nats_password` | `""` | NATS credentials. **Required on `api` nodes**: the NATS server there enforces them, and scheduler nodes must use the same values. Port `4222` is published on the API node for the scheduler hosts (restrict it to those hosts with an upstream firewall or `DOCKER-USER` iptables rules; plain host firewall rules such as UFW do not filter ports that Docker publishes); the monitor port `8222` is bound to `127.0.0.1`. |
 | `hades_nats_tls_enabled` | `false` | Enable TLS for the NATS connection. |
 | `hades_scheduler_concurrency` | `1` | Number of jobs the scheduler runs concurrently. |
 | `hades_executor` | `docker` | Scheduler executor (`docker` or `k8s`). |

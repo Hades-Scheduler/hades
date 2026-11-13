@@ -20,7 +20,9 @@ services:
 
   nats:
     image: nats:2.11.4
-    command: ["-js", "-m", "8222", "--user", {{ hades_nats_username | to_json }}, "--pass", {{ hades_nats_password | to_json }}]
+    command: ["-js", "-m", "8222", "-c", "/etc/nats/auth.conf"]
+    volumes:
+      - ./nats-auth.conf:/etc/nats/auth.conf:ro
     ports:
       - "4222:4222"
       - "127.0.0.1:8222:8222"

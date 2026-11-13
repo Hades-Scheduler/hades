@@ -173,14 +173,14 @@ var (
 	// urlUserToken matches a token-only URL credential (scheme://token@host).
 	urlUserToken = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)([A-Za-z0-9_.\-]{12,})(@)`)
 	// spacedSecretFlag matches --password/--token style flags whose value is the
-	// next word; "--password-stdin" does not match because the flag must end
+	// next word or quoted string; "--password-stdin" does not match because the flag must end
 	// with the keyword.
-	spacedSecretFlag = regexp.MustCompile(`(?i)(\s--[\w\-]*?(?:token|secret|passwd|password|pwd|api[_-]?key|credential)\s+)(["']?)([^\s"';\-][^\s"';]*)`)
+	spacedSecretFlag = regexp.MustCompile(`(?i)(\s--[\w\-]*?(?:token|secret|passwd|password|pwd|api[_-]?key|credential)\s+)((?:"[^"]*"|'[^']*'|[^\s"';\-][^\s"';]*))`)
 	// loginPassword matches -p <secret> only on a registry login command line,
 	// where -p is a password; elsewhere it is a path or port flag.
-	loginPassword = regexp.MustCompile(`(\b(?:docker|podman|buildah|skopeo|crane|oras)\b[^\n;&|]*?\blogin\b[^\n;&|]*?\s-p\s+)(["']?)([^\s"';]+)`)
+	loginPassword = regexp.MustCompile(`(\b(?:docker|podman|buildah|skopeo|crane|oras)\b[^\n;&|]*?\blogin\b[^\n;&|]*?\s-p\s+)((?:"[^"]*"|'[^']*'|[^\s"';]+))`)
 	// mysqlPassword matches the attached -p<secret> form of the mysql tools.
-	mysqlPassword = regexp.MustCompile(`(\bmysql(?:dump|admin)?\b[^\n;&|]*?\s-p)(["']?)([^\s"';]+)`)
+	mysqlPassword = regexp.MustCompile(`(\bmysql(?:dump|admin)?\b[^\n;&|]*?\s-p)((?:"[^"]*"|'[^']*'|[^\s"';]+))`)
 	// urlCredentials captures the password segment of a scheme://user:pass@host URL.
 	urlCredentials = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@]+:)([^/\s@]+)(@)`)
 	// sensitiveAssignment matches KEY=VALUE / KEY: VALUE / export KEY=VALUE where
@@ -212,9 +212,9 @@ func (r *Redactor) Text(s string) string {
 		return sub[1] + Mask + sub[3]
 	})
 	s = authHeader.ReplaceAllString(s, "${1}"+Mask)
-	s = spacedSecretFlag.ReplaceAllString(s, "${1}${2}"+Mask)
-	s = loginPassword.ReplaceAllString(s, "${1}${2}"+Mask)
-	s = mysqlPassword.ReplaceAllString(s, "${1}${2}"+Mask)
+	s = spacedSecretFlag.ReplaceAllString(s, "${1}"+Mask)
+	s = loginPassword.ReplaceAllString(s, "${1}"+Mask)
+	s = mysqlPassword.ReplaceAllString(s, "${1}"+Mask)
 	s = sensitiveAssignment.ReplaceAllString(s, "${1}${2}"+Mask)
 	s = pemBlock.ReplaceAllString(s, Mask)
 	s = jwtInline.ReplaceAllString(s, Mask)

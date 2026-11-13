@@ -439,6 +439,9 @@ func TestLockoutMapBounded(t *testing.T) {
 	if n > maxFailureEntries {
 		t.Fatalf("failures map grew to %d, cap is %d", n, maxFailureEntries)
 	}
+	if s.auth.reserve("one-key-too-many") {
+		t.Fatal("a full map must refuse attempts it cannot count")
+	}
 }
 
 func TestJobLogsRejectsNonUUID(t *testing.T) {

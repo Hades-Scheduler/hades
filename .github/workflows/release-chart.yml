@@ -43,7 +43,7 @@ jobs:
           helm repo add nats https://nats-io.github.io/k8s/helm/charts/
           helm dependency build helm/hades
           helm lint helm/hades
-          helm template hades helm/hades > /dev/null
+          helm template hades helm/hades --set hadesApi.authKeySecret=hades-auth > /dev/null
 
   # Publishes only on pushes to main (and manual dispatch), never on PRs.
   release:

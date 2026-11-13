@@ -15,6 +15,15 @@
     mode: "0600"
   notify: Restart hades api
 
+- name: Add nats auth config
+  become: true
+  no_log: true
+  ansible.builtin.template:
+    src: nats-auth.conf.j2
+    dest: /opt/hades/api/nats-auth.conf
+    mode: "0600"
+  notify: Restart hades api
+
 - name: Add hades api docker compose
   become: true
   no_log: true

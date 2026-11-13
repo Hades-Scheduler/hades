@@ -164,6 +164,7 @@ curl https://hades.example.com/ping
 Or submit a test job:
 
 ```bash
+AUTH_KEY=<the AUTH_KEY from .env>
 curl -X POST https://hades.example.com/build \
   -u "hades:$AUTH_KEY" \
   -H "Content-Type: application/json" \

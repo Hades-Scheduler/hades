@@ -1,0 +1,70 @@
+{{- if .Values.networkPolicy.enabled }}
+# Job pods run untrusted step code: no connections into the release namespace.
+# Other namespaces (DNS) and the outside stay reachable.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hades-job-pods
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      hades.tum.de/managed-by: hades-operator
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: NotIn
+                values: [{{ .Release.Namespace | quote }}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            {{- with .Values.networkPolicy.jobPods.blockedCIDRs }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+---
+# Only the Hades components (and NATS itself, for clustering) reach NATS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hades-nats
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- if .Values.networkPolicy.nats.podLabels }}
+      {{- toYaml .Values.networkPolicy.nats.podLabels | nindent 6 }}
+      {{- else }}
+      app.kubernetes.io/name: nats
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- end }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - hades-api-selector
+                  - hades-scheduler-selector
+                  - hades-operator-selector
+                  - hades-log-manager-selector
+      ports:
+        - protocol: TCP
+          port: {{ .Values.nats.port }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- if .Values.networkPolicy.nats.podLabels }}
+              {{- toYaml .Values.networkPolicy.nats.podLabels | nindent 14 }}
+              {{- else }}
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              {{- end }}
+{{- end }}

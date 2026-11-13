@@ -51,7 +51,9 @@ Hades measures how much overhead it adds around a job, per step and per phase, c
 | -------- | ------- | ----------- |
 | `API_PORT` | `8080` | Port the HTTP API listens on. |
 | `METRICS_PORT` | `8082` | Port the Prometheus `/metrics` endpoint listens on. |
-| `AUTH_KEY` | | HTTP Basic Auth key for the `hades` user. Empty disables auth. |
+| `AUTH_KEY` | | HTTP Basic Auth key for the `hades` user. Required: the API exits at start when it is empty unless `ALLOW_UNAUTHENTICATED=true`. |
+| `ALLOW_UNAUTHENTICATED` | `false` | Serve `/build` without auth when `AUTH_KEY` is empty. Local development only. |
+| `DASHBOARD_TRUSTED_PROXIES` | | Proxy addresses or CIDRs whose `X-Forwarded-For` is trusted for the dashboard login lockout (5 attempts per client address per 15 minutes). Set it behind a reverse proxy. |
 
 :::note Reserved (not yet implemented)
 `PROMETHEUS_ADDRESS`, `RETENTION_IN_MIN`, `MAX_RETRIES`, and `TIMEOUT_IN_MIN` appear in `.env.example` but are **not read by any component today**. They are placeholders for planned features. Prometheus metrics are served on `METRICS_PORT`, not `PROMETHEUS_ADDRESS`.
@@ -80,6 +82,9 @@ Depending on `HADES_EXECUTOR`, the Docker or Kubernetes variables below also app
 | `DOCKER_SCRIPT_EXECUTOR` | `/bin/bash -c` | Shell used to run each step's `script`. |
 | `DOCKER_CPU_LIMIT` | | Default CPU limit (whole CPUs) when a step sets none. |
 | `DOCKER_MEMORY_LIMIT` | | Default memory limit (e.g. `4g`) when a step sets none. |
+| `DOCKER_ALLOWED_NETWORKS` | `none,bridge,default` | Network modes a step may request. `host` and named networks fail the job unless listed. Never list the network that carries NATS. |
+| `HADES_DEFAULT_JOB_TIMEOUT_SECONDS` | `0` | Job timeout when `timeout_seconds` is 0. `0` = off. Docker executor only. |
+| `HADES_MAX_JOB_TIMEOUT_SECONDS` | `0` | Upper bound on every job's timeout. `0` = off. Docker executor only. |
 
 ### Kubernetes executor (`HADES_EXECUTOR=k8s`)
 
@@ -128,6 +133,10 @@ Deployed by the Helm chart (`hades-log-manager`); also run locally via `make run
 | `STATUS_WEBHOOK_MAX_BACKOFF` | `5m` | Ceiling for the retry delay. |
 | `STATUS_WEBHOOK_CONCURRENCY` | `16` | Deliveries in flight at once; keeps a dead receiver from delaying other jobs. |
 | `STATUS_WEBHOOK_MAX_PENDING` | `1000` | Status events awaiting acknowledgement (in flight or backing off). |
+
+| `CALLBACK_ALLOWED_HOSTS` | | Host names, IPs or CIDRs exempt from the callback address block (internal receivers such as Artemis in the same cluster or compose network). A host name entry must equal the host in the callback URL and trusts whatever it resolves to. |
+
+Callbacks to loopback, private (RFC 1918, `fc00::/7`), CGNAT (`100.64.0.0/10`), link-local (including `169.254.169.254`), unspecified and multicast addresses are refused at connect time unless allowed by `CALLBACK_ALLOWED_HOSTS`. The log callback does not follow redirects, HTTP proxy environment variables are ignored, and a blocked status webhook is logged as an error and not retried.
 
 Both outbound pushes are configured per job, not globally:
 

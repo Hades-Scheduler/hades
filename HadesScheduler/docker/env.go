@@ -19,4 +19,15 @@ type EnvConfig struct {
 	// "30s". Zero keeps "always" meaning every job. Concurrent pulls of the
 	// same image are shared regardless of this setting.
 	ImagePullFreshness time.Duration `env:"DOCKER_IMAGE_PULL_FRESHNESS" envDefault:"0s"`
+
+	// AllowedNetworks lists the network modes a step may request. A step with
+	// no network uses the Docker default and is always allowed. Anything else
+	// (e.g. "host" or the name of the control-plane network) fails the job.
+	AllowedNetworks []string `env:"DOCKER_ALLOWED_NETWORKS" envSeparator:"," envDefault:"none,bridge,default"`
+
+	// DefaultJobTimeoutSeconds applies to jobs with timeout_seconds 0 and
+	// MaxJobTimeoutSeconds caps every job (also those without a timeout).
+	// Zero turns the respective setting off.
+	DefaultJobTimeoutSeconds int64 `env:"HADES_DEFAULT_JOB_TIMEOUT_SECONDS" envDefault:"0"`
+	MaxJobTimeoutSeconds     int64 `env:"HADES_MAX_JOB_TIMEOUT_SECONDS" envDefault:"0"`
 }

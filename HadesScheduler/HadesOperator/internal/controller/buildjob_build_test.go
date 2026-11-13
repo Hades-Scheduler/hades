@@ -349,3 +349,30 @@ func TestBuildK8sJob_HonoursFinalizerImageOverride(t *testing.T) {
 	}
 	t.Fatalf("no %s container in the pod spec", FinalizerContainerName)
 }
+
+// Job pods run untrusted step code, so they must not mount a service account
+// token and every container must forbid privilege escalation.
+func TestBuildK8sJob_PodHardening(t *testing.T) {
+	bj := &buildv1.BuildJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "job-1"},
+		Spec: buildv1.BuildJobSpec{
+			Steps: []buildv1.BuildStep{{ID: 1, Image: "alpine", Script: "true"}},
+		},
+	}
+
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
+	spec := job.Spec.Template.Spec
+
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		t.Error("automountServiceAccountToken must be false")
+	}
+	if spec.SecurityContext == nil || spec.SecurityContext.SeccompProfile == nil ||
+		spec.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Error("pod seccomp profile must be RuntimeDefault")
+	}
+	for _, c := range append(spec.InitContainers, spec.Containers...) {
+		if c.SecurityContext == nil || c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation {
+			t.Errorf("container %q must set allowPrivilegeEscalation=false", c.Name)
+		}
+	}
+}

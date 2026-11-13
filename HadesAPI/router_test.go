@@ -358,6 +358,54 @@ func (suite *APISuite) TestInvalidStatusCallbackURL() {
 	assert.Contains(suite.T(), w.Body.String(), "Invalid status_callback_url")
 }
 
+func (suite *APISuite) TestDuplicateStepIDs() {
+	w := httptest.NewRecorder()
+	restPayload := payload.RESTPayload{
+		Priority: 1,
+		QueuePayload: payload.QueuePayload{
+			Name: "example",
+			Steps: []payload.Step{
+				{ID: 1, Name: "a", Image: "image1", Script: "s"},
+				{ID: 1, Name: "b", Image: "image1", Script: "s"},
+			},
+		},
+	}
+	jsonValue, _ := json.Marshal(restPayload)
+	req, _ := http.NewRequest("POST", "/build", bytes.NewBuffer(jsonValue))
+	req.Header.Set("Content-Type", "application/json")
+	suite.router.ServeHTTP(w, req)
+
+	assert.Equal(suite.T(), 400, w.Code)
+	assert.Contains(suite.T(), w.Body.String(), "Duplicate step id 1")
+}
+
+func (suite *APISuite) TestBuildBodyTooLarge() {
+	w := httptest.NewRecorder()
+	big := `{"name":"example","steps":[{"id":1,"name":"a","image":"i","script":"` + strings.Repeat("x", maxBuildBodyBytes) + `"}]}`
+	req, _ := http.NewRequest("POST", "/build", strings.NewReader(big))
+	req.Header.Set("Content-Type", "application/json")
+	suite.router.ServeHTTP(w, req)
+
+	assert.Equal(suite.T(), 413, w.Code)
+}
+
+func (suite *APISuite) TestSwaggerBehindAuth() {
+	suite.T().Setenv("DEBUG", "true")
+	router := setupRouter("secret", suite.hadesProducer, suite.statusPublisher, nil)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/swagger/doc.json", nil)
+	router.ServeHTTP(w, req)
+	assert.Equal(suite.T(), 401, w.Code)
+
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/swagger/index.html", nil)
+	req.RequestURI = req.URL.Path
+	req.SetBasicAuth("hades", "secret")
+	router.ServeHTTP(w, req)
+	assert.Equal(suite.T(), 200, w.Code)
+}
+
 func (suite *APISuite) TestInvalidJSON() {
 	w := httptest.NewRecorder()
 	restPayload := struct {

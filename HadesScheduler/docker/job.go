@@ -10,6 +10,7 @@ import (
 
 	"github.com/hades-scheduler/hades/shared/buildlogs"
 	"github.com/hades-scheduler/hades/shared/payload"
+	"github.com/hades-scheduler/hades/shared/redact"
 	"github.com/hades-scheduler/hades/shared/timing"
 	"github.com/moby/moby/client"
 )
@@ -37,6 +38,10 @@ func (d Job) execute(ctx context.Context) error {
 	// would defeat the point of ContinueOnError and would be inconsistent with the Kubernetes
 	// executor, where such a step never fails the job at all.
 	stepErr := error(nil)
+
+	if err := d.checkNetworks(d.Steps); err != nil {
+		return err
+	}
 
 	// Pull all images in parallel up front. Pulling per step would make each
 	// later step pay for its pull only after the previous step finished.
@@ -116,5 +121,6 @@ func (d Job) execute(ctx context.Context) error {
 // API keys, and the script can embed them too, so neither belongs in Info logs.
 func logStep(logger *slog.Logger, msg string, step payload.Step) {
 	logger.Info(msg, slog.Int("step_id", step.ID), slog.String("step_name", step.Name), slog.String("image", step.Image))
-	logger.Debug(msg, slog.Any("step", step))
+	redacted := redact.Default().Payload(payload.QueuePayload{Steps: []payload.Step{step}})
+	logger.Debug(msg, slog.Any("step", redacted.Steps[0]))
 }

@@ -2,6 +2,7 @@ package docker
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hades-scheduler/hades/shared/buildlogs"
@@ -106,6 +107,33 @@ func WithImagePullFreshness(window time.Duration) DockerOption {
 			return fmt.Errorf("image pull freshness must not be negative, got %s", window)
 		}
 		s.imagePullFreshness = window
+		return nil
+	}
+}
+
+// WithAllowedNetworks sets the network modes a step may request. A step without
+// a network is always allowed.
+func WithAllowedNetworks(networks []string) DockerOption {
+	return func(s *Scheduler) error {
+		s.allowedNetworks = nil
+		for _, n := range networks {
+			if n = strings.TrimSpace(n); n != "" {
+				s.allowedNetworks = append(s.allowedNetworks, n)
+			}
+		}
+		return nil
+	}
+}
+
+// WithJobTimeouts sets the default timeout for jobs without one and the maximum
+// timeout for all jobs, in seconds. Zero turns a setting off.
+func WithJobTimeouts(defaultSeconds, maxSeconds int64) DockerOption {
+	return func(s *Scheduler) error {
+		if defaultSeconds < 0 || maxSeconds < 0 {
+			return fmt.Errorf("job timeouts must not be negative")
+		}
+		s.defaultJobTimeout = defaultSeconds
+		s.maxJobTimeout = maxSeconds
 		return nil
 	}
 }

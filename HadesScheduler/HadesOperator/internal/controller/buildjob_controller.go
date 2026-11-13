@@ -116,6 +116,11 @@ const (
 	LabelPriority = hades.MetadataKeyPriority
 )
 
+func noPrivilegeEscalation() *corev1.SecurityContext {
+	f := false
+	return &corev1.SecurityContext{AllowPrivilegeEscalation: &f}
+}
+
 // ManagedByValue is the value of the LabelManagedBy label applied to Jobs the
 // operator owns.
 const ManagedByValue = "hades-operator"
@@ -314,7 +319,7 @@ func positiveOrDefault(d, fallback time.Duration) time.Duration {
 
 // +kubebuilder:rbac:groups=build.hades.tum.de,resources=buildjobs;buildjobs/status;buildjobs/finalizers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods;events;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods;events,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile ensures the cluster state matches the desired state of a BuildJob.
 // It creates/owns a batch Job, updates BuildJob status and each ContainerStatus of the BuildJob, and cleans up on completion.
@@ -830,9 +835,10 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 			// ran in / here and in /shared under Docker, and with an image
 			// declaring WORKDIR /app it would run in /app. That silently breaks
 			// the promise that the same job runs unmodified on either executor.
-			WorkingDir:   sharedMount.MountPath,
-			Env:          envFromMeta(env),
-			VolumeMounts: []corev1.VolumeMount{sharedMount},
+			WorkingDir:      sharedMount.MountPath,
+			Env:             envFromMeta(env),
+			VolumeMounts:    []corev1.VolumeMount{sharedMount},
+			SecurityContext: noPrivilegeEscalation(),
 		}
 
 		if hasScript {
@@ -908,10 +914,19 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{"sh", "-c", "echo build finished"},
 		VolumeMounts:    []corev1.VolumeMount{sharedMount},
+		SecurityContext: noPrivilegeEscalation(),
 	}
 
 	gracePeriod := int64(podTerminationGracePeriodSeconds)
+	noToken := false
 	podSpec := corev1.PodSpec{
+		// Steps run untrusted code and never talk to the Kubernetes API.
+		AutomountServiceAccountToken: &noToken,
+		// Root and default capabilities stay allowed on purpose: arbitrary step
+		// images often need them (package installs).
+		SecurityContext: &corev1.PodSecurityContext{
+			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
 		InitContainers: initCtrs,
 		Containers:     []corev1.Container{dummy},
 		Volumes: []corev1.Volume{{

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/hades-scheduler/hades/shared/payload"
@@ -127,18 +128,59 @@ func (r *Redactor) Metadata(m map[string]string) map[string]string {
 // redacted, and secrets scrubbed from each step's Script. The input payload and
 // its slices/maps are never modified.
 func (r *Redactor) Payload(job payload.QueuePayload) payload.QueuePayload {
+	secrets := r.maskedValues(job.Metadata, nil)
+	for _, st := range job.Steps {
+		secrets = r.maskedValues(st.Metadata, secrets)
+	}
+	// Longest first so a secret that contains another one is replaced whole.
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	pairs := make([]string, 0, 2*len(secrets))
+	for _, v := range secrets {
+		pairs = append(pairs, v, Mask)
+	}
+	scrub := strings.NewReplacer(pairs...)
+
 	job.Metadata = r.Metadata(job.Metadata)
 	steps := make([]payload.Step, len(job.Steps))
 	copy(steps, job.Steps)
 	for i := range steps {
 		steps[i].Metadata = r.Metadata(steps[i].Metadata)
-		steps[i].Script = r.Text(steps[i].Script)
+		steps[i].Script = r.Text(scrub.Replace(steps[i].Script))
 	}
 	job.Steps = steps
 	return job
 }
 
+// minScriptSecretLen is the shortest masked metadata value that is also
+// scrubbed from scripts; shorter values ("1", "on") would mangle ordinary text.
+const minScriptSecretLen = 4
+
+// maskedValues appends the values of m that Value masks (and that are long
+// enough to search for) to dst.
+func (r *Redactor) maskedValues(m map[string]string, dst []string) []string {
+	for k, v := range m {
+		if _, masked := r.Value(k, v); masked && len(v) >= minScriptSecretLen {
+			dst = append(dst, v)
+		}
+	}
+	return dst
+}
+
 var (
+	// authHeader matches an Authorization header or assignment with a Bearer,
+	// Basic or Token scheme; group 2 is the credential.
+	authHeader = regexp.MustCompile(`(?i)(authorization\s*[:=]\s*["']?(?:bearer|basic|token)\s+)([^\s"';]+)`)
+	// urlUserToken matches a token-only URL credential (scheme://token@host).
+	urlUserToken = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)([A-Za-z0-9_.\-]{12,})(@)`)
+	// spacedSecretFlag matches --password/--token style flags whose value is the
+	// next word; "--password-stdin" does not match because the flag must end
+	// with the keyword.
+	spacedSecretFlag = regexp.MustCompile(`(?i)(\s--[\w\-]*?(?:token|secret|passwd|password|pwd|api[_-]?key|credential)\s+)(["']?)([^\s"';\-][^\s"';]*)`)
+	// loginPassword matches -p <secret> only on a registry login command line,
+	// where -p is a password; elsewhere it is a path or port flag.
+	loginPassword = regexp.MustCompile(`(\b(?:docker|podman|buildah|skopeo|crane|oras)\b[^\n;&|]*?\blogin\b[^\n;&|]*?\s-p\s+)(["']?)([^\s"';]+)`)
+	// mysqlPassword matches the attached -p<secret> form of the mysql tools.
+	mysqlPassword = regexp.MustCompile(`(\bmysql(?:dump|admin)?\b[^\n;&|]*?\s-p)(["']?)([^\s"';]+)`)
 	// urlCredentials captures the password segment of a scheme://user:pass@host URL.
 	urlCredentials = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@]+:)([^/\s@]+)(@)`)
 	// sensitiveAssignment matches KEY=VALUE / KEY: VALUE / export KEY=VALUE where
@@ -162,6 +204,17 @@ func (r *Redactor) Text(s string) string {
 		return s
 	}
 	s = urlCredentials.ReplaceAllString(s, "${1}"+Mask+"${3}")
+	s = urlUserToken.ReplaceAllStringFunc(s, func(m string) string {
+		sub := urlUserToken.FindStringSubmatch(m)
+		if !strings.ContainsAny(sub[2], "0123456789_-") {
+			return m
+		}
+		return sub[1] + Mask + sub[3]
+	})
+	s = authHeader.ReplaceAllString(s, "${1}"+Mask)
+	s = spacedSecretFlag.ReplaceAllString(s, "${1}${2}"+Mask)
+	s = loginPassword.ReplaceAllString(s, "${1}${2}"+Mask)
+	s = mysqlPassword.ReplaceAllString(s, "${1}${2}"+Mask)
 	s = sensitiveAssignment.ReplaceAllString(s, "${1}${2}"+Mask)
 	s = pemBlock.ReplaceAllString(s, Mask)
 	s = jwtInline.ReplaceAllString(s, Mask)

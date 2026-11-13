@@ -26,7 +26,7 @@ The Operator introduces a `BuildJob` Custom Resource Definition (CRD). When the 
    reason recorded in the status and surfaced in the dashboard, and its `Job` is deleted so
    it stops retrying.
 3. Publishes status transitions and logs back to NATS.
-4. Cleans up completed resources (configurable via `DeleteOnComplete`).
+4. Cleans up completed resources (`DeleteOnComplete`, default `true`).
 
 ```
 NATS ──▶ Scheduler ──▶ BuildJob (CRD) ──▶ Operator Controller ──▶ Job / Pods
@@ -46,6 +46,12 @@ hadesScheduler:
 ```
 
 The scheduler uses a dynamic Kubernetes client to create `BuildJob` custom resources; the Operator does the rest. Authentication uses the pod's in-cluster `ServiceAccount` - no `kubeconfig` file is needed.
+
+## Job pod hardening
+
+Job pods do not mount a service account token, use the `RuntimeDefault` seccomp profile and set `allowPrivilegeEscalation: false`. They still run as the image's user. The API and the log manager have their own service accounts, and the operator role has no access to secrets or configmaps.
+
+Set `networkPolicy.enabled: true` (default `false`) to add two NetworkPolicies: job pods cannot reach the release namespace, and only Hades components reach NATS on 4222. Before enabling, check the NATS pod labels. On CNIs that match pod IPs against `ipBlock`, set `networkPolicy.jobPods.blockedCIDRs` to the pod CIDR.
 
 ## RBAC
 

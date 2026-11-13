@@ -8,17 +8,19 @@
 
 - name: Create hades config env file
   become: true
+  no_log: true
   ansible.builtin.template:
     src: hades.env.j2
     dest: /opt/hades/scheduler/.env
-    mode: 0644
+    mode: "0600"
 
 - name: Add hades scheduler docker compose
   become: true
+  no_log: true
   ansible.builtin.template:
     src: docker-compose-scheduler.yml.j2
     dest: /opt/hades/scheduler/docker-compose.yml
-    mode: 0644
+    mode: "0600"
 
 - name: Pull new scheduler docker image
   become: true

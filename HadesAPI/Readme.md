@@ -15,14 +15,14 @@ It does **not** run jobs itself and holds no state.
 | Method | Path | Auth | Description |
 | ------ | ---- | ---- | ----------- |
 | `GET` | `/ping` | none | Liveness probe (`{"status":"ok","timestamp":...}`). |
-| `POST` | `/build` | Basic (when `AUTH_KEY` set) | Validate and enqueue a job. Returns the assigned `job_id`. |
+| `POST` | `/build` | Basic | Validate and enqueue a job. Returns the assigned `job_id`. |
 
 The full request/response contract and the job payload schema are in [docs/api.md](../docs/api.md) and the [published API reference](https://hades-scheduler.github.io/hades/docs/reference/api).
 
 ### Example
 
 ```bash
-# When AUTH_KEY is set, add:  -u "hades:$AUTH_KEY"
+# Add:  -u "hades:$AUTH_KEY"
 curl -X POST -H "Content-Type: application/json" \
   -d '{"name":"Example","steps":[{"id":1,"name":"hi","image":"alpine:latest","script":"echo hello"}]}' \
   http://localhost:8080/build
@@ -30,7 +30,7 @@ curl -X POST -H "Content-Type: application/json" \
 
 ## Authentication
 
-If `AUTH_KEY` is set, `/build` requires HTTP Basic Auth with username `hades` and the key as the password. If it is empty, the endpoint is open and a warning is logged at startup.
+`/build` requires HTTP Basic Auth with username `hades` and `AUTH_KEY` as the password. `AUTH_KEY` is required: with an empty key the API exits at start unless `ALLOW_UNAUTHENTICATED=true` (local development only; `make run` sets it). Bodies are capped at 1 MiB (413 above), duplicate step ids get 400, and the `DEBUG=true` Swagger UI sits behind the same Basic Auth.
 
 ## Priority
 
@@ -38,7 +38,7 @@ If `AUTH_KEY` is set, `/build` requires HTTP Basic Auth with username `hades` an
 
 ## Configuration
 
-Common variables: `API_PORT` (default `8080`), `AUTH_KEY`, `NATS_URL`. See [docs/configuration.md](../docs/configuration.md) for the complete list.
+Common variables: `API_PORT` (default `8080`), `AUTH_KEY`, `ALLOW_UNAUTHENTICATED`, `NATS_URL`. See [docs/configuration.md](../docs/configuration.md) for the complete list.
 
 ## Run locally
 

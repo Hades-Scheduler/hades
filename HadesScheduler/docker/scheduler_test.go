@@ -92,6 +92,7 @@ func newTestScheduler(t *testing.T, publisher buildlogs.LogPublisher) *Scheduler
 			// alpine ships /bin/sh, not bash.
 			scriptExecutor:      "/bin/sh -c",
 			containerAutoremove: false,
+			allowedNetworks:     []string{"none", "bridge", "default"},
 		},
 		logPublisher:    publisher,
 		statusPublisher: log.NewNoopPublisher(),

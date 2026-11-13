@@ -74,7 +74,11 @@ The bundled Jaeger UI Service is cluster-internal (ClusterIP) by default, so you
 | -------- | ------- | ----------- | ------ |
 | `API_PORT` | `8080` | Port the HTTP API listens on. | `HadesAPI/main.go` (`HadesAPIConfig`) |
 | `METRICS_PORT` | `8082` | Port the Prometheus `/metrics` endpoint listens on (see [Metrics](#metrics-all-components)). | `HadesAPI/main.go` (`HadesAPIConfig`) |
-| `AUTH_KEY` | | HTTP Basic Auth key for the `hades` user. Empty disables auth (a warning is logged). | `HadesAPI/main.go` (`HadesAPIConfig`) |
+| `AUTH_KEY` | | HTTP Basic Auth key for the `hades` user. Required: the API exits at start when it is empty unless `ALLOW_UNAUTHENTICATED=true`. | `HadesAPI/main.go` (`HadesAPIConfig`) |
+| `ALLOW_UNAUTHENTICATED` | `false` | Start with an empty `AUTH_KEY` and serve `/build` without auth. Local development only; `make run` sets it. | `HadesAPI/main.go` (`HadesAPIConfig`) |
+| `DASHBOARD_TRUSTED_PROXIES` | | Comma-separated proxy addresses or CIDRs whose `X-Forwarded-For` is trusted for the dashboard login lockout (5 attempts per client address per 15 minutes). Set it behind a reverse proxy, otherwise all clients share one lockout (a warning is logged at start). | `HadesAPI/main.go` (`HadesAPIConfig`) |
+
+`POST /build` bodies are capped at 1 MiB (413 above) and duplicate step ids get 400. The dashboard login body is capped at 4 KiB.
 
 Plus the [NATS](#nats-connection-all-components) and [global](#global-all-components) variables.
 
@@ -105,6 +109,9 @@ Plus the [NATS](#nats-connection-all-components) and [global](#global-all-compon
 | `DOCKER_SCRIPT_EXECUTOR` | `/bin/bash -c` | Shell used to run each step's `script`. | `HadesScheduler/docker/env.go` |
 | `DOCKER_CPU_LIMIT` | | Default CPU limit (whole CPUs, e.g. `6`) when a step sets none. | `HadesScheduler/docker/env.go` |
 | `DOCKER_MEMORY_LIMIT` | | Default memory limit (e.g. `4g`) when a step sets none. | `HadesScheduler/docker/env.go` |
+| `DOCKER_ALLOWED_NETWORKS` | `none,bridge,default` | Comma-separated network modes a step may request. `host` and named networks fail the job with a reason unless listed. Never list the network that carries NATS. | `HadesScheduler/docker/env.go` |
+| `HADES_DEFAULT_JOB_TIMEOUT_SECONDS` | `0` | Job timeout applied when the payload's `timeout_seconds` is 0. `0` = off. Docker executor only. | `HadesScheduler/docker/env.go` |
+| `HADES_MAX_JOB_TIMEOUT_SECONDS` | `0` | Upper bound on every job's timeout. `0` = off. Docker executor only. | `HadesScheduler/docker/env.go` |
 
 ### Kubernetes executor (`HADES_EXECUTOR=k8s`)
 
@@ -154,7 +161,9 @@ Deployed by the Helm chart (`hades-log-manager`); also run locally via `make run
 | `STATUS_WEBHOOK_CONCURRENCY` | `16` | Deliveries in flight at once; keeps a dead receiver from delaying other jobs. | `HadesLogManager/status_webhook.go` |
 | `STATUS_WEBHOOK_MAX_PENDING` | `1000` | Status events awaiting acknowledgement (in flight or backing off). | `HadesLogManager/status_webhook.go` |
 
-Both outbound pushes are configured per job, not globally:
+| `CALLBACK_ALLOWED_HOSTS` | | Comma-separated host names, IPs or CIDRs exempt from the callback address block (internal receivers such as Artemis in the same cluster or compose network). A host name entry must equal the host in the callback URL and trusts whatever it resolves to. | `HadesLogManager/http_client.go` |
+
+Both outbound pushes are configured per job, not globally. Callbacks to loopback, private (RFC 1918, `fc00::/7`), CGNAT (`100.64.0.0/10`), link-local (including `169.254.169.254`), unspecified and multicast addresses are refused at connect time unless allowed by `CALLBACK_ALLOWED_HOSTS`. The log callback does not follow redirects, and HTTP proxy environment variables are ignored. A blocked status webhook is logged as an error and not retried.
 
 - `callback_url` - an absolute `http`/`https` URL with a host. The Log Manager forwards that job's aggregated **logs** there once the log stream has drained. If omitted, the job's logs are not forwarded.
 - `status_callback_url` - an absolute `http`/`https` URL with a host. Receives the **job-status webhook** on the terminal status, independently of log forwarding. See [`HadesLogManager/Readme.md`](../HadesLogManager/Readme.md#job-status-webhook).

@@ -58,6 +58,9 @@ func securityHeaders() gin.HandlerFunc {
 	}
 }
 
+// maxBuildBodyBytes caps the /build request body (1 MiB).
+const maxBuildBodyBytes = 1 << 20
+
 func setupRouter(authKey string, producer hades.JobPublisher, statusPublisher buildstatus.StatusPublisher, dash *dashboard.Server) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.ErrorLogger())
@@ -78,18 +81,18 @@ func setupRouter(authKey string, producer hades.JobPublisher, statusPublisher bu
 
 	r.GET("/ping", ping)
 
-	// Swagger UI (and its doc.json) are only exposed when DEBUG is enabled, so
-	// the API contract is never served in production.
-	if os.Getenv("DEBUG") == "true" {
-		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
-	}
-
 	api := r.Group("/")
 	if authKey == "" {
 		slog.Warn("No auth key set")
 	} else {
 		slog.Info("Auth key set")
 		api.Use(gin.BasicAuth(gin.Accounts{"hades": authKey}))
+	}
+
+	// Swagger UI (and its doc.json) are only exposed when DEBUG is enabled and
+	// sit inside the auth group, so they need credentials when a key is set.
+	if os.Getenv("DEBUG") == "true" {
+		api.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
 
 	api.POST("/build", func(c *gin.Context) {
@@ -161,7 +164,14 @@ func bindErrorMessage(err error) string {
 func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublisher buildstatus.StatusPublisher, dash *dashboard.Server) {
 	var p payload.RESTPayload
 	p.Priority = 3
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBuildBodyBytes)
 	if err := c.ShouldBind(&p); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusRequestEntityTooLarge, fmt.Sprintf("Request body must not exceed %d bytes", maxBuildBodyBytes))
+			return
+		}
 		msg := bindErrorMessage(err)
 		slog.Error("Failed to bind request payload", "error", err)
 		buildRequestsTotal.WithLabelValues("rejected").Inc()
@@ -180,7 +190,15 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 		return
 	}
 
+	seenStepIDs := make(map[int]bool, len(p.QueuePayload.Steps))
 	for _, step := range p.QueuePayload.Steps {
+		if seenStepIDs[step.ID] {
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusBadRequest, fmt.Sprintf("Duplicate step id %d: step ids must be unique", step.ID))
+			return
+		}
+		seenStepIDs[step.ID] = true
+
 		var memLimitBytes int64
 		if step.MemoryLimit != "" {
 			parsed, err := utils.ParseMemoryLimit(step.MemoryLimit)

@@ -85,7 +85,8 @@ func NewLogAggregator(ctx context.Context, hlc *buildlogs.HadesLogConsumer, reso
 	}
 
 	if client == nil {
-		client = &http.Client{Timeout: httpClientTimeout}
+		allow, _ := parseCallbackAllowlist(nil)
+		client = &http.Client{Timeout: httpClientTimeout, Transport: newCallbackTransport(0, allow), CheckRedirect: noRedirect}
 	}
 
 	la := &NATSLogAggregator{

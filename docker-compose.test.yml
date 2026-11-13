@@ -13,7 +13,7 @@ services:
       - NATS_URL=nats://nats:4222
       # Deployed version shown in the dashboard header; matches the image tag.
       - HADES_VERSION=${IMAGE_TAG}
-      - AUTH_KEY=${AUTH_KEY:-}
+      - AUTH_KEY=${AUTH_KEY:?AUTH_KEY is required}
       - RETENTION_IN_MIN=${RETENTION_IN_MIN:-30}
       - MAX_RETRIES=${MAX_RETRIES:-3}
       - TIMEOUT_IN_MIN=${TIMEOUT_IN_MIN:-0}

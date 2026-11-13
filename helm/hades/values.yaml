@@ -26,8 +26,11 @@ hadesApi:
       cpu: "200m"
       memory: "256Mi"
   # -- Name of an existing Secret holding key `AUTH_KEY` to protect the `/build`
-  # endpoint. Empty = no auth (endpoint is open).
+  # endpoint. Required unless `allowUnauthenticated` is true.
   authKeySecret: ""
+  # -- Serve `/build` without authentication when `authKeySecret` is empty.
+  # Only for throwaway test installs; the API refuses to start otherwise.
+  allowUnauthenticated: false
   # -- Operator dashboard (web UI) served by the API.
   dashboard:
     # -- Name of an existing Secret with keys `DASHBOARD_USERNAME`,
@@ -118,13 +121,13 @@ hadesOperator:
     enabled: true
   # -- Namespace the operator watches for BuildJob CRs (empty = release namespace).
   targetNamespace: ""
-  # -- Delete BuildJob CRs (and their Jobs) once they finish. Defaults to false so
-  # completed BuildJobs/pods linger (they self-clean via the Job TTL, ~1h) and the
-  # operator can capture every step's logs before the pod is removed; Kubernetes
-  # only serves container logs while the pod exists, so immediate deletion can lose
-  # logs for fast jobs. Set to true only once the operator captures all logs before
-  # deletion (the companion barrier fix).
-  DeleteOnComplete: false
+  # -- Delete BuildJob CRs (and their Jobs) once they finish. Defaults to true so
+  # job scripts and metadata (which may hold secrets) do not stay in the cluster.
+  # The operator waits until every step's logs are published (bounded by
+  # `logDrainTimeout`) before it deletes, because Kubernetes only serves container
+  # logs while the pod exists. Set to false to keep finished BuildJobs and pods for
+  # debugging; they then self-clean via the Job TTL (~1h) but the BuildJob CR stays.
+  DeleteOnComplete: true
   # -- Maximum number of Jobs the operator admits concurrently; excess are suspended.
   maxParallelism: "100"
   # -- Safety resync for a BuildJob whose Job is still running (Go duration). The
@@ -186,6 +189,11 @@ hadesLogManager:
     requests:
       cpu: "200m"
       memory: "256Mi"
+  # -- Comma-separated host names, IPs or CIDRs that `callback_url` and
+  # `status_callback_url` may target although they are loopback, private or
+  # link-local, e.g. the in-cluster Artemis service
+  # (`artemis.artemis.svc.cluster.local`). Empty = public addresses only.
+  callbackAllowedHosts: ""
   # Where aggregated job logs are forwarded is configured per job via the
   # "callback_url" field on the build request, not globally on the log manager.
   statusWebhook:
@@ -207,6 +215,12 @@ hadesLogManager:
     maxPending: 1000
 
 rbac:
+  hadesApi:
+    # -- ServiceAccount name for the API (no Kubernetes API access, token not mounted).
+    serviceAccountName: hades-api
+  hadesLogManager:
+    # -- ServiceAccount name for the log manager (no Kubernetes API access, token not mounted).
+    serviceAccountName: hades-log-manager
   hadesScheduler:
     # -- ServiceAccount name for the scheduler.
     serviceAccountName: hades-scheduler
@@ -315,6 +329,22 @@ tracing:
         # -- Basic-auth password. Required when the UI Ingress is enabled and no
         # `existingSecret` is given; the chart hashes it into an htpasswd Secret.
         password: ""
+
+# -- NetworkPolicies. They need a CNI that enforces NetworkPolicy and are off by
+# default because the NATS policy assumes the labels of the bundled NATS chart.
+networkPolicy:
+  # -- Render the NetworkPolicies below. Verify the NATS pod labels first
+  # (`kubectl get pods -n <ns> --show-labels`), then enable.
+  enabled: false
+  jobPods:
+    # -- CIDRs job pods may not reach, on top of every pod in the release
+    # namespace. Set this to the cluster pod CIDR on CNIs that match pod IPs
+    # against ipBlock rules, otherwise the "outside" rule can still reach pods.
+    blockedCIDRs: []
+  nats:
+    # -- Labels of the NATS pods. Defaults match the bundled nats chart
+    # (`app.kubernetes.io/name: nats`, `app.kubernetes.io/instance: <release>`).
+    podLabels: {}
 
 nats:
   config:

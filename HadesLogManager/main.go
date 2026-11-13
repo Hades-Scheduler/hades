@@ -117,7 +117,16 @@ func run(cfg HadesLogManagerConfig) error {
 		"concurrency", webhookCfg.Concurrency,
 		"max_pending", webhookCfg.MaxPending,
 	)
-	transport := newCallbackTransport(webhookCfg.Concurrency)
+	var callbackCfg CallbackConfig
+	if err := utils.LoadConfig(&callbackCfg); err != nil {
+		return fmt.Errorf("loading callback configuration: %w", err)
+	}
+	allow, err := parseCallbackAllowlist(callbackCfg.AllowedHosts)
+	if err != nil {
+		return err
+	}
+	slog.Info("Callback configuration", "allowed_hosts", callbackCfg.AllowedHosts)
+	transport := newCallbackTransport(webhookCfg.Concurrency, allow)
 
 	// Create log aggregator
 	var aggregatorConfig AggregatorConfig
@@ -129,7 +138,7 @@ func run(cfg HadesLogManagerConfig) error {
 		"retention", aggregatorConfig.Retention,
 		"max_job_logs", aggregatorConfig.MaxJobLogs,
 	)
-	logClient := &http.Client{Timeout: httpClientTimeout, Transport: transport}
+	logClient := &http.Client{Timeout: httpClientTimeout, Transport: transport, CheckRedirect: noRedirect}
 	logAggregator := NewLogAggregator(ctx, consumer, resolver, logClient, aggregatorConfig)
 
 	var watcherCfg LogWatcherConfig

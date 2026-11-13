@@ -12,6 +12,8 @@ spec:
       labels:
         app: hades-log-manager-selector
     spec:
+      serviceAccountName: {{ .Values.rbac.hadesLogManager.serviceAccountName }}
+      automountServiceAccountToken: false
       containers:
         - name: "hades-log-manager"
           image: "{{ .Values.hadesLogManager.image.repository }}:{{ .Values.hadesLogManager.image.tag | default .Chart.AppVersion }}"
@@ -52,6 +54,8 @@ spec:
               value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
             - name: HADESLOGMANAGER_API_PORT
               value: {{ .Values.hadesLogManager.service.targetPort | quote }}
+            - name: CALLBACK_ALLOWED_HOSTS
+              value: {{ .Values.hadesLogManager.callbackAllowedHosts | quote }}
             - name: STATUS_WEBHOOK_ENABLED
               value: {{ .Values.hadesLogManager.statusWebhook.enabled | quote }}
             - name: STATUS_WEBHOOK_MAX_ATTEMPTS

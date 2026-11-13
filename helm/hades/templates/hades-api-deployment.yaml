@@ -15,6 +15,8 @@ spec:
       labels:
         app: hades-api-selector
     spec:
+      serviceAccountName: {{ .Values.rbac.hadesApi.serviceAccountName }}
+      automountServiceAccountToken: false
       containers:
         - name: "hades-api"
           image: "{{ .Values.hadesApi.image.repository }}:{{ .Values.hadesApi.image.tag | default .Chart.AppVersion }}"
@@ -63,6 +65,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.hadesApi.authKeySecret | quote }}
                   key: AUTH_KEY
+            {{- else if .Values.hadesApi.allowUnauthenticated }}
+            - name: ALLOW_UNAUTHENTICATED
+              value: "true"
+            {{- else }}
+            {{- fail "hadesApi.authKeySecret is empty: set it to a Secret with key AUTH_KEY, or set hadesApi.allowUnauthenticated=true to serve /build without authentication" }}
             {{- end }}
             {{- if .Values.hadesApi.dashboard.secretName }}
             # Dashboard credentials. When this Secret is set the operator UI is

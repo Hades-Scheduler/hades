@@ -20,13 +20,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// HadesAPIConfig holds the API server configuration. An empty AuthKey disables
-// Basic Auth on the /build endpoint.
+// HadesAPIConfig holds the API server configuration. An empty AuthKey is
+// refused at start unless AllowUnauthenticated is set, which leaves /build open.
 type HadesAPIConfig struct {
 	APIPort     uint `env:"API_PORT,notEmpty" envDefault:"8080"`
 	MetricsPort uint `env:"METRICS_PORT,notEmpty" envDefault:"8082"`
 	NatsConfig  hadesnats.ConnectionConfig
 	AuthKey     string `env:"AUTH_KEY"`
+	// AllowUnauthenticated is the explicit opt-out for local development: it
+	// lets the API start without an AuthKey and serve /build to everyone.
+	AllowUnauthenticated bool `env:"ALLOW_UNAUTHENTICATED" envDefault:"false"`
 	// TrustedProxies are the CIDRs/IPs of front proxies (e.g. the ingress) that
 	// may set X-Forwarded-For. Empty (default) trusts none, so ClientIP() uses
 	// the direct RemoteAddr and cannot be spoofed via a forged XFF header - which
@@ -36,6 +39,13 @@ type HadesAPIConfig struct {
 }
 
 var cfg HadesAPIConfig
+
+func (c HadesAPIConfig) validate() error {
+	if c.AuthKey == "" && !c.AllowUnauthenticated {
+		return errors.New("AUTH_KEY is empty: set AUTH_KEY, or set ALLOW_UNAUTHENTICATED=true to serve /build without authentication (local development only)")
+	}
+	return nil
+}
 
 // @title                      HadesAPI
 // @version                    1.0
@@ -47,6 +57,11 @@ func main() {
 
 	if err := utils.LoadConfig(&cfg); err != nil {
 		slog.Error("Failed to load configuration", "error", err)
+		os.Exit(1)
+	}
+
+	if err := cfg.validate(); err != nil {
+		slog.Error("Invalid configuration", "error", err)
 		os.Exit(1)
 	}
 
@@ -110,6 +125,9 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("Dashboard enabled")
+		if len(cfg.TrustedProxies) == 0 {
+			slog.Warn("DASHBOARD_TRUSTED_PROXIES is empty: behind a reverse proxy all clients share the proxy's address, so the dashboard login lockout is shared by everyone and one client can lock the others out. Set it to the proxy's address range")
+		}
 	} else {
 		slog.Warn("Dashboard disabled (set DASHBOARD_USERNAME, DASHBOARD_PASSWORD_HASH and DASHBOARD_SESSION_SECRET to enable)")
 	}

@@ -35,7 +35,7 @@ func newTestAggregator(t *testing.T, resolver jobCallbackResolver) buildlogs.Log
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return NewLogAggregator(ctx, nil, resolver, nil, testConfig())
+	return NewLogAggregator(ctx, nil, resolver, loopbackClient(t), testConfig())
 }
 
 // newTestAggregatorMax builds an aggregator with a specific per-container entry
@@ -302,4 +302,38 @@ func TestCleanupStaleJobs(t *testing.T) {
 	agg.cleanupStaleJobs(time.Now())
 	_, err = agg.GetJobStatus("fresh")
 	assert.NoError(t, err)
+}
+
+func TestSendJobLogs_DoesNotFollowRedirects(t *testing.T) {
+	var targetHits int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
+	}))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	agg := newTestAggregator(t, fakeResolver{url: srv.URL})
+	agg.AddLog(buildlogs.Log{JobID: "job-1", ContainerID: "c1"})
+
+	require.Error(t, agg.SendJobLogs(context.Background(), "job-1"))
+	assert.Equal(t, int32(0), atomic.LoadInt32(&targetHits), "redirect target must not be contacted")
+}
+
+func TestSendJobLogs_BlocksLoopbackByDefault(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agg := NewLogAggregator(ctx, nil, fakeResolver{url: srv.URL}, nil, testConfig())
+	agg.AddLog(buildlogs.Log{JobID: "job-1", ContainerID: "c1"})
+
+	require.ErrorIs(t, agg.SendJobLogs(context.Background(), "job-1"), errBlockedTarget)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&hits))
 }

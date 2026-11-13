@@ -28,14 +28,16 @@ Copy the example environment file and review the defaults:
 cp .env.example .env
 ```
 
-The default configuration uses `docker` as the executor, so no further changes are required for local testing. The most common variables:
+The default configuration uses `docker` as the executor. You must set `AUTH_KEY` in `.env` (for example `openssl rand -hex 32`): `compose.yml` refuses to start without it and passes it to the API.
+
+The most common variables:
 
 | Variable | Default | Description |
 |---|---|---|
 | `HADES_EXECUTOR` | `docker` | Execution backend. Use `docker` for local mode. |
 | `CONCURRENCY` | `1` | Number of jobs processed concurrently. The bundled `compose.yml` sets this to `4` unless overridden. |
 | `API_PORT` | `8080` | Port the Hades API listens on. |
-| `AUTH_KEY` | *(empty)* | HTTP Basic Auth key for `/build` (empty = no auth). |
+| `AUTH_KEY` | *(required)* | HTTP Basic Auth key for `/build` (user `hades`). The API refuses to start without it unless `ALLOW_UNAUTHENTICATED=true`. |
 
 See the [Configuration Reference](../reference/configuration) for the full list.
 
@@ -52,9 +54,9 @@ make docker-run     # equivalent to: docker compose -f compose.yml up -d
 ```
 
 With `make docker-run` this starts:
-- **hadesAPI** on port `8081` (mapped from internal `8080`)
+- **hadesAPI** on `127.0.0.1:8081` (mapped from internal `8080`, reachable from the host only)
 - **hadesScheduler** connected to the Docker socket
-- **nats** on ports `4222` (client) and `8222` (monitoring)
+- **nats** on `127.0.0.1` ports `4222` (client) and `8222` (monitoring)
 
 :::note
 `make run` also starts the **Log Manager** (port `8081`) for inspecting job status and logs. The Log Manager is not part of the Docker Compose stack.
@@ -73,6 +75,7 @@ You can also open the NATS monitoring dashboard at [http://localhost:8222](http:
 
 ```bash
 curl -X POST http://localhost:8081/build \
+  -u "hades:<your AUTH_KEY>" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Hello World",

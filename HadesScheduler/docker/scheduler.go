@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -35,6 +36,9 @@ type Options struct {
 	containerLogsOptions container.LogConfig
 	imagePullPolicy      PullPolicy
 	imagePullFreshness   time.Duration
+	allowedNetworks      []string
+	defaultJobTimeout    int64
+	maxJobTimeout        int64
 }
 
 // Scheduler runs jobs on the local Docker daemon and publishes their logs and
@@ -86,6 +90,7 @@ func NewDefaultScheduler() (*Scheduler, error) {
 		// built programmatically without options must not silently become less
 		// safe than one built before this setting existed.
 		imagePullPolicy: PullAlways,
+		allowedNetworks: []string{"none", "bridge", "default"},
 	}
 
 	scheduler := &Scheduler{
@@ -97,6 +102,29 @@ func NewDefaultScheduler() (*Scheduler, error) {
 	}
 
 	return scheduler, nil
+}
+
+// effectiveTimeout applies the operator's default (for 0) and maximum (cap,
+// also for 0 when no default applies) to a job's timeout_seconds.
+func (o Options) effectiveTimeout(seconds int64) int64 {
+	if seconds <= 0 {
+		seconds = o.defaultJobTimeout
+	}
+	if o.maxJobTimeout > 0 && (seconds <= 0 || seconds > o.maxJobTimeout) {
+		seconds = o.maxJobTimeout
+	}
+	return seconds
+}
+
+// checkNetworks rejects a step that asks for a network outside the allowlist.
+// An empty network means the Docker default and is always allowed.
+func (o Options) checkNetworks(steps []payload.Step) error {
+	for _, step := range steps {
+		if step.Network != "" && !slices.Contains(o.allowedNetworks, step.Network) {
+			return fmt.Errorf("step %d: network %q is not allowed (DOCKER_ALLOWED_NETWORKS)", step.ID, step.Network)
+		}
+	}
+	return nil
 }
 
 // ScheduleJob runs every step of job sequentially in its own container. It
@@ -185,6 +213,7 @@ func (d *Scheduler) ScheduleJob(ctx context.Context, job payload.QueuePayload) e
 	// context is cancelled, which unblocks the running step's ContainerWait and
 	// triggers its force-cleanup so no container is left running.
 	execCtx := ctx
+	job.TimeoutSeconds = d.effectiveTimeout(job.TimeoutSeconds)
 	if job.TimeoutSeconds > 0 {
 		// Clamp to the overflow-safe bound (the API rejects larger values, but a
 		// payload may reach the scheduler from other producers): seconds *

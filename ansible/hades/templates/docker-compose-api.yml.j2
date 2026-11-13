@@ -3,7 +3,7 @@ services:
   hadesAPI:
     image: ghcr.io/hades-scheduler/hades/hades-api:{{ hades_api_version }}
     ports:
-      - "{{hades_api_port}}:8080"
+      - "127.0.0.1:{{ hades_api_port }}:8080"
     networks:
       - hades
     depends_on:
@@ -15,15 +15,15 @@ services:
       - NATS_PASSWORD={{ hades_nats_password }}
       - NATS_TLS_ENABLED={{ hades_nats_tls_enabled }}
       - DEBUG={{ hades_api_debug }}
-      - AUTH_KEY={{ hades_api_auth_key | default('') }}
+      - AUTH_KEY={{ hades_api_password }}
 
 
   nats:
     image: nats:2.11.4
-    command: ["-js", "-m", "8222"]
+    command: ["-js", "-m", "8222", "--user", {{ hades_nats_username | to_json }}, "--pass", {{ hades_nats_password | to_json }}]
     ports:
       - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:8222:8222"
     networks:
       - hades
     healthcheck:

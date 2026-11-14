@@ -378,7 +378,8 @@ networkPolicy:
     # -- CIDRs job pods may not reach. Inside the cluster job pods are allowed
     # DNS only; set this to the cluster pod and service CIDRs on CNIs that match
     # pod IPs against ipBlock rules (Calico), otherwise the "outside" rule can
-    # still reach pods.
+    # still reach pods. Add the node addresses as well: the API
+    # server, kubelet and other node ports are "outside" for a NetworkPolicy.
     blockedCIDRs: []
   nats:
     # -- Labels of the NATS pods. Defaults match the bundled nats chart

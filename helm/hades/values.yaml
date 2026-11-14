@@ -381,6 +381,11 @@ networkPolicy:
     # still reach pods. Add the node addresses as well: the API
     # server, kubelet and other node ports are "outside" for a NetworkPolicy.
     blockedCIDRs: []
+    # -- Namespaces of the cluster's ingress controller(s). Job pods may reach
+    # their pods on ports 80 and 443, so that hosts served by this cluster (a
+    # git server the job clones from, for example) stay reachable although the
+    # pod network is blocked.
+    ingressNamespaces: []
   nats:
     # -- Labels of the NATS pods. Defaults match the bundled nats chart
     # (`app.kubernetes.io/name: nats`, `app.kubernetes.io/instance: <release>`).

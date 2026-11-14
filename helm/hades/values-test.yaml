@@ -46,6 +46,8 @@ nats:
 networkPolicy:
   enabled: true
   jobPods:
+    ingressNamespaces:
+      - ingress-nginx
     blockedCIDRs:
       - 198.18.0.0/15
       # Node addresses of the test cluster (API server, kubelet, etcd, SSH and

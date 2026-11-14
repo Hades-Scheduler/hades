@@ -21,6 +21,21 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    {{- with .Values.networkPolicy.jobPods.ingressNamespaces }}
+    # Sites published through the cluster's own ingress controller resolve to
+    # controller pods, which the pod network block below would cut off.
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: {{ toJson . }}
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    {{- end }}
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0

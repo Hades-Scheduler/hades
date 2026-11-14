@@ -381,6 +381,15 @@ networkPolicy:
     # still reach pods. Add the node addresses as well: the API
     # server, kubelet and other node ports are "outside" for a NetworkPolicy.
     blockedCIDRs: []
+    dns:
+      # -- Labels of the namespace running the cluster DNS. Job pods may reach
+      # port 53 only on pods in it that match `podLabels`. The defaults fit
+      # CoreDNS and kube-dns; adjust them for other DNS deployments.
+      namespaceLabels:
+        kubernetes.io/metadata.name: kube-system
+      # -- Labels of the cluster DNS pods.
+      podLabels:
+        k8s-app: kube-dns
     # -- Namespaces of the cluster's ingress controller(s). Job pods may reach
     # their pods on ports 80 and 443, so that hosts served by this cluster (a
     # git server the job clones from, for example) stay reachable although the

@@ -20,7 +20,7 @@ The chart is published to GHCR as an OCI artifact. In every command below, repla
 `<version>` with the chart version you want to install (for example `1.0.0`; see the
 [available versions](https://github.com/Hades-Scheduler/hades/pkgs/container/charts%2Fhades)):
 
-Create the API auth Secret first. `/build` then needs Basic Auth with user `hades` and that key. For throwaway test installs only, `--set hadesApi.allowUnauthenticated=true` skips the Secret.
+Create the API auth Secret first. `/build` then needs Basic Auth with user `hades` and that key. For throwaway test installs only, skip the Secret and pass `--set hadesApi.allowUnauthenticated=true` instead of `--set hadesApi.authKeySecret=hades-auth` (a set `authKeySecret` always wins).
 
 ```bash
 kubectl create namespace hades
@@ -34,6 +34,8 @@ helm upgrade --install hades oci://ghcr.io/hades-scheduler/charts/hades \
 ```
 
 ### Option B - From a local checkout
+
+Create the `hades-auth` Secret first, as shown in Option A, or use the unauthenticated test setting described there.
 
 ```bash
 # 1. Add the NATS sub-chart dependency
@@ -83,6 +85,8 @@ helm show crds oci://ghcr.io/hades-scheduler/charts/hades --version <version> | 
 :::
 
 ## Upgrade & Rollback
+
+The command below needs the `hades-auth` Secret to exist. If your release already uses a different Secret name, pass that name instead.
 
 ```bash
 helm upgrade hades oci://ghcr.io/hades-scheduler/charts/hades --version <version> -n hades \

@@ -446,3 +446,41 @@ func TestLogBudget_ConcurrentAddsNoRaceAndWithinBudget(t *testing.T) {
 	defer agg.mu.Unlock()
 	assert.LessOrEqual(t, agg.totalBytes, 500)
 }
+
+// A container at its MaxJobLogs cap replaces its oldest line, so the new line
+// must not count as extra budget even when the budget is full.
+func TestLogBudget_CappedContainerReplacesOldestLine(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	agg := NewLogAggregator(ctx, nil, nil, nil, AggregatorConfig{BatchSize: 100, Retention: time.Hour, MaxJobLogs: 1, MaxTotalBytes: 100})
+
+	agg.AddLog(buildlogs.Log{JobID: "j", ContainerID: "c", Logs: []buildlogs.LogEntry{logEntry(strings.Repeat("a", 60))}})
+	agg.AddLog(buildlogs.Log{JobID: "j", ContainerID: "c", Logs: []buildlogs.LogEntry{logEntry(strings.Repeat("b", 60))}})
+
+	logs := agg.GetJobLogs("j")
+	require.Len(t, logs[0].Logs, 1)
+	assert.Equal(t, strings.Repeat("b", 60), logs[0].Logs[0].Message)
+	assert.Equal(t, 60, agg.totalBytes)
+}
+
+// Flush and reset race with AddLog: the byte accounting must end at zero once
+// the logs are gone.
+func TestLogBudget_FlushRaceLeavesNoAccounting(t *testing.T) {
+	agg := newBudgetAggregator(t, 1<<20)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			addBytes(agg, "j", 10)
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		_ = agg.FlushJob("j")
+		agg.ResetJobLogs("j")
+	}
+	<-done
+	_ = agg.FlushJob("j")
+
+	assert.Equal(t, 0, agg.totalBytes)
+	assert.Empty(t, agg.jobBytes)
+}

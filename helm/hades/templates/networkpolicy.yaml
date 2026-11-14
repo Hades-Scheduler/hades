@@ -1,7 +1,8 @@
 {{- if .Values.networkPolicy.enabled }}
 # Job pods run untrusted step code: inside the cluster they reach DNS only, so
 # neither this release nor other namespaces (another Hades install, for one)
-# are exposed to them. The outside stays reachable.
+# are exposed to them. The outside stays reachable. DNS goes to the cluster DNS
+# pods only, so a stray listener on port 53 elsewhere is not exempted.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -15,7 +16,12 @@ spec:
     - Egress
   egress:
     - to:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.jobPods.dns.namespaceLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.jobPods.dns.podLabels | nindent 14 }}
       ports:
         - protocol: UDP
           port: 53

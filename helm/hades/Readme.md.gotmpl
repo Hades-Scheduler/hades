@@ -57,7 +57,7 @@ The Scheduler does not create Pods directly; instead it creates `BuildJob` CRs, 
       cat ./helm/hades/values.yaml
       ```
 
-3. Create the API auth Secret. `/build` then needs Basic Auth with user `hades` and that key. For throwaway test installs only, `--set hadesApi.allowUnauthenticated=true` skips the Secret.
+3. Create the API auth Secret. `/build` then needs Basic Auth with user `hades` and that key. For throwaway test installs only, skip the Secret and pass `--set hadesApi.allowUnauthenticated=true` instead of `--set hadesApi.authKeySecret=hades-auth` (a set `authKeySecret` always wins).
     ```bash
     kubectl create namespace hades
     kubectl -n hades create secret generic hades-auth --from-literal=AUTH_KEY=<choose-a-key>

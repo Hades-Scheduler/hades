@@ -81,14 +81,41 @@ type OperatorConfig struct {
 	// if-not-present or never. If empty, Kubernetes pulls :latest and untagged
 	// images on every step.
 	ImagePullPolicy string `env:"K8S_IMAGE_PULL_POLICY"`
-	// Defaults for what a job leaves unset. Empty or 0 disables each one.
-	JobDefaultTimeoutSeconds int64  `env:"JOB_DEFAULT_TIMEOUT_SECONDS" envDefault:"3600"`
+	// Defaults for what a job leaves unset. Empty or 0 disables each one. These
+	// carry no envDefault tag: the env library swaps an explicitly empty value for
+	// the default, which would make disabling impossible. applyUnsetJobDefaults
+	// sets them only when the variable is absent.
+	JobDefaultTimeoutSeconds int64  `env:"JOB_DEFAULT_TIMEOUT_SECONDS"`
 	JobMaxTimeoutSeconds     int64  `env:"JOB_MAX_TIMEOUT_SECONDS" envDefault:"0"`
-	JobDefaultCPULimit       string `env:"JOB_DEFAULT_CPU_LIMIT" envDefault:"2"`
-	JobDefaultMemoryLimit    string `env:"JOB_DEFAULT_MEMORY_LIMIT" envDefault:"4Gi"`
-	JobMaxCPULimit           string `env:"JOB_MAX_CPU_LIMIT" envDefault:"16"`
-	JobMaxMemoryLimit        string `env:"JOB_MAX_MEMORY_LIMIT" envDefault:"32Gi"`
-	JobSharedVolumeSizeLimit string `env:"JOB_SHARED_VOLUME_SIZE_LIMIT" envDefault:"10Gi"`
+	JobDefaultCPULimit       string `env:"JOB_DEFAULT_CPU_LIMIT"`
+	JobDefaultMemoryLimit    string `env:"JOB_DEFAULT_MEMORY_LIMIT"`
+	JobMaxCPULimit           string `env:"JOB_MAX_CPU_LIMIT"`
+	JobMaxMemoryLimit        string `env:"JOB_MAX_MEMORY_LIMIT"`
+	JobSharedVolumeSizeLimit string `env:"JOB_SHARED_VOLUME_SIZE_LIMIT"`
+}
+
+// applyUnsetJobDefaults fills the job defaults of variables that are not set at
+// all. A variable set to the empty string stays empty and disables its default.
+func (c *OperatorConfig) applyUnsetJobDefaults() {
+	unset := func(k string) bool { _, ok := os.LookupEnv(k); return !ok }
+	if unset("JOB_DEFAULT_TIMEOUT_SECONDS") {
+		c.JobDefaultTimeoutSeconds = 3600
+	}
+	if unset("JOB_DEFAULT_CPU_LIMIT") {
+		c.JobDefaultCPULimit = "2"
+	}
+	if unset("JOB_DEFAULT_MEMORY_LIMIT") {
+		c.JobDefaultMemoryLimit = "4Gi"
+	}
+	if unset("JOB_MAX_CPU_LIMIT") {
+		c.JobMaxCPULimit = "16"
+	}
+	if unset("JOB_MAX_MEMORY_LIMIT") {
+		c.JobMaxMemoryLimit = "32Gi"
+	}
+	if unset("JOB_SHARED_VOLUME_SIZE_LIMIT") {
+		c.JobSharedVolumeSizeLimit = "10Gi"
+	}
 }
 
 // parseQuantity parses an optional Kubernetes quantity; empty means unset.
@@ -216,6 +243,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	operatorConfig.applyUnsetJobDefaults()
 	operatorConfig.normalize()
 	pullPolicy, err := controller.ParseImagePullPolicy(operatorConfig.ImagePullPolicy)
 	if err != nil {

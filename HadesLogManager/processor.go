@@ -172,7 +172,7 @@ func (la *NATSLogAggregator) AddLog(log buildlogs.Log) {
 
 	la.mu.Lock()
 	defer la.mu.Unlock()
-	if la.cfg.MaxTotalBytes > 0 && !la.makeRoom(log.JobID, entriesBytes(log.Logs)) {
+	if need := la.netNewBytes(log); la.cfg.MaxTotalBytes > 0 && need > 0 && !la.makeRoom(log.JobID, need) {
 		// Keep the container slot (steps are positional) but drop the lines.
 		if !la.dropWarned[log.JobID] {
 			la.dropWarned[log.JobID] = true
@@ -239,6 +239,33 @@ func (la *NATSLogAggregator) AddLog(log buildlogs.Log) {
 	}
 }
 
+// netNewBytes is how much AddLog grows the job's memory use: the incoming bytes
+// minus what trimming the container to MaxJobLogs drops from its oldest entries.
+// Without this, a container at its cap could never replace old lines once the
+// budget is full. Callers hold la.mu.
+func (la *NATSLogAggregator) netNewBytes(log buildlogs.Log) int {
+	need := entriesBytes(log.Logs)
+	if la.cfg.MaxJobLogs <= 0 {
+		return need
+	}
+	value, ok := la.logs.Load(log.JobID)
+	if !ok {
+		return need
+	}
+	var prev []buildlogs.LogEntry
+	for _, l := range *value.(logsVersion).ptr {
+		if l.ContainerID == log.ContainerID {
+			prev = l.Logs
+			break
+		}
+	}
+	combined := append(append([]buildlogs.LogEntry(nil), prev...), log.Logs...)
+	if drop := len(combined) - la.cfg.MaxJobLogs; drop > 0 {
+		need -= entriesBytes(combined[:drop])
+	}
+	return need
+}
+
 func entriesBytes(entries []buildlogs.LogEntry) int {
 	n := 0
 	for _, e := range entries {
@@ -303,10 +330,12 @@ func (la *NATSLogAggregator) trimContainerEntries(jobID, containerID string, ent
 // Returns:
 //   - error: Always nil in current implementation
 func (la *NATSLogAggregator) FlushJob(jobID string) error {
+	// Release and delete under one lock, or a concurrent AddLog could re-charge
+	// logs that are about to be deleted and leak that budget.
 	la.mu.Lock()
 	la.release(jobID)
-	la.mu.Unlock()
 	value, logsExists := la.logs.LoadAndDelete(jobID)
+	la.mu.Unlock()
 	if logsExists {
 		v := value.(logsVersion)
 		logs := *v.ptr
@@ -332,8 +361,8 @@ func (la *NATSLogAggregator) FlushJob(jobID string) error {
 func (la *NATSLogAggregator) ResetJobLogs(jobID string) {
 	la.mu.Lock()
 	la.release(jobID)
-	la.mu.Unlock()
 	la.logs.Delete(jobID)
+	la.mu.Unlock()
 	la.completed.Delete(jobID)
 }
 

@@ -36,6 +36,39 @@ func TestOperatorConfigDefaults(t *testing.T) {
 	}
 }
 
+// An absent job default variable gets its default, but one set to the empty
+// string stays empty: that is how an operator disables the default.
+func TestOperatorConfigJobDefaultsEmptyDisables(t *testing.T) {
+	jobVars := []string{"JOB_DEFAULT_TIMEOUT_SECONDS", "JOB_DEFAULT_CPU_LIMIT", "JOB_DEFAULT_MEMORY_LIMIT", "JOB_MAX_CPU_LIMIT", "JOB_MAX_MEMORY_LIMIT", "JOB_SHARED_VOLUME_SIZE_LIMIT"}
+	for _, k := range jobVars {
+		if old, ok := os.LookupEnv(k); ok {
+			t.Cleanup(func() { _ = os.Setenv(k, old) })
+		}
+		_ = os.Unsetenv(k)
+	}
+
+	cfg := loadOperatorConfig(t)
+	cfg.applyUnsetJobDefaults()
+	if cfg.JobDefaultTimeoutSeconds != 3600 || cfg.JobDefaultCPULimit != "2" || cfg.JobDefaultMemoryLimit != "4Gi" ||
+		cfg.JobMaxCPULimit != "16" || cfg.JobMaxMemoryLimit != "32Gi" || cfg.JobSharedVolumeSizeLimit != "10Gi" {
+		t.Errorf("unset variables did not get their defaults: %+v", cfg)
+	}
+
+	for _, k := range jobVars {
+		t.Setenv(k, "")
+	}
+	cfg = loadOperatorConfig(t)
+	cfg.applyUnsetJobDefaults()
+	if cfg.JobDefaultTimeoutSeconds != 0 || cfg.JobDefaultCPULimit != "" || cfg.JobDefaultMemoryLimit != "" ||
+		cfg.JobMaxCPULimit != "" || cfg.JobMaxMemoryLimit != "" || cfg.JobSharedVolumeSizeLimit != "" {
+		t.Errorf("empty variables must stay empty: %+v", cfg)
+	}
+	d, err := cfg.jobDefaults()
+	if err != nil || d.CPULimit != nil || d.MemoryLimit != nil || d.MaxCPULimit != nil || d.MaxMemoryLimit != nil || d.SharedVolumeSizeLimit != nil {
+		t.Errorf("jobDefaults() = %+v, %v, want everything disabled", d, err)
+	}
+}
+
 func TestOperatorConfigParsesDurations(t *testing.T) {
 	clearOperatorEnv(t)
 	t.Setenv("REQUEUE_DELAY", "250ms")

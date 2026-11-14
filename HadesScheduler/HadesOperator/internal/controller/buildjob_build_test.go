@@ -439,6 +439,37 @@ func TestBuildK8sJob_ResourceDefaults(t *testing.T) {
 	}
 }
 
+// A request-only step must not get a default limit below its request, and the
+// maximum must bound a step even when the defaults are disabled.
+func TestBuildK8sJob_RequestAndMaxLimits(t *testing.T) {
+	q := resource.MustParse
+	cpu, mem := q("2"), q("4Gi")
+	maxCPU, maxMem := q("16"), q("32Gi")
+	initC := func(step buildv1.BuildStep, d JobDefaults) corev1.Container {
+		return buildK8sJob(defaultsTestJob(nil, step), "job-1", true, false, DefaultFinalizerImage, "", d).Spec.Template.Spec.InitContainers[0]
+	}
+
+	reqCPU, reqMem := q("8"), q("8Gi")
+	c := initC(buildv1.BuildStep{CPURequest: &reqCPU, MemoryRequest: &reqMem}, JobDefaults{CPULimit: &cpu, MemoryLimit: &mem, MaxCPULimit: &maxCPU, MaxMemoryLimit: &maxMem})
+	if !c.Resources.Limits.Cpu().Equal(reqCPU) || !c.Resources.Limits.Memory().Equal(reqMem) {
+		t.Errorf("limits = %v, want them raised to the requests", c.Resources.Limits)
+	}
+
+	// A request above the maximum is clamped, and so is the raised limit.
+	bigMem := q("64Gi")
+	c = initC(buildv1.BuildStep{MemoryRequest: &bigMem}, JobDefaults{MemoryLimit: &mem, MaxMemoryLimit: &maxMem})
+	if !c.Resources.Limits.Memory().Equal(maxMem) || !c.Resources.Requests.Memory().Equal(maxMem) {
+		t.Errorf("resources = %v, want limit and request at 32Gi", c.Resources)
+	}
+
+	// Only maxima configured: a step without limits gets the maximum as limit,
+	// but its (unset) request does not become the maximum.
+	c = initC(buildv1.BuildStep{}, JobDefaults{MaxCPULimit: &maxCPU, MaxMemoryLimit: &maxMem})
+	if !c.Resources.Limits.Cpu().Equal(maxCPU) || !c.Resources.Limits.Memory().Equal(maxMem) {
+		t.Errorf("limits = %v, want the maxima", c.Resources.Limits)
+	}
+}
+
 func TestBuildK8sJob_SharedVolumeSizeLimit(t *testing.T) {
 	size := resource.MustParse("10Gi")
 	vol := func(d JobDefaults) *corev1.EmptyDirVolumeSource {

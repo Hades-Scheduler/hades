@@ -158,6 +158,22 @@ func clampQuantity(q, max *resource.Quantity, what, buildJob string, stepID int3
 	return max
 }
 
+// effectiveLimit picks the step's own limit, else the operator default raised to
+// the step's request (Kubernetes rejects a request above its limit), else the
+// operator maximum. The caller clamps the result to the maximum.
+func effectiveLimit(limit, request, def, max *resource.Quantity) *resource.Quantity {
+	if limit != nil {
+		return limit
+	}
+	if def != nil && request != nil && request.Cmp(*def) > 0 {
+		return request
+	}
+	if def != nil {
+		return def
+	}
+	return max
+}
+
 // maxCreateMessage bounds the API server message kept as the failure reason,
 // which for a huge Job can list thousands of field errors.
 const maxCreateMessage = 300
@@ -957,14 +973,10 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 			}
 		}
 
-		// Set resource limits: the step's own, else the operator default
-		cpuLimit, memLimit := s.CPULimit, s.MemoryLimit
-		if cpuLimit == nil {
-			cpuLimit = defaults.CPULimit
-		}
-		if memLimit == nil {
-			memLimit = defaults.MemoryLimit
-		}
+		// Set resource limits: the step's own, else the operator default, else
+		// the operator maximum, so the maximum holds even with defaults disabled.
+		cpuLimit := effectiveLimit(s.CPULimit, s.CPURequest, defaults.CPULimit, defaults.MaxCPULimit)
+		memLimit := effectiveLimit(s.MemoryLimit, s.MemoryRequest, defaults.MemoryLimit, defaults.MaxMemoryLimit)
 		cpuLimit = clampQuantity(cpuLimit, defaults.MaxCPULimit, "cpu limit", bj.Name, s.ID)
 		memLimit = clampQuantity(memLimit, defaults.MaxMemoryLimit, "memory limit", bj.Name, s.ID)
 		if cpuLimit != nil || memLimit != nil {

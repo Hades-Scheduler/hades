@@ -45,6 +45,9 @@ jobs:
 
       - name: Determine benchmark mode and host
         id: mode_resolve
+        env:
+          JENKINS_USER_SECRET: ${{ secrets.JENKINS_USER }}
+          JENKINS_TOKEN_SECRET: ${{ secrets.JENKINS_TOKEN }}
         run: |
           set -euo pipefail
           echo "Selected mode: ${{ inputs.mode }}"
@@ -61,8 +64,9 @@ jobs:
             jenkins)
               echo "MODE_PATH=jenkins" >> $GITHUB_ENV
               echo "BENCHMARK_HOST=${{ vars.JENKINS_HOST }}" >> $GITHUB_ENV
-              echo "JENKINS_USER=${{ secrets.JENKINS_USER }}" >> $GITHUB_ENV
-              echo "JENKINS_TOKEN=${{ secrets.JENKINS_TOKEN }}" >> $GITHUB_ENV
+              echo "JENKINS_USER=${JENKINS_USER_SECRET}" >> $GITHUB_ENV
+              echo "::add-mask::${JENKINS_TOKEN_SECRET}"
+              echo "JENKINS_TOKEN=${JENKINS_TOKEN_SECRET}" >> $GITHUB_ENV
               echo "JENKINS_JOB_PATH=${{ vars.JENKINS_JOB_PATH }}" >> $GITHUB_ENV
               ;;
             *)
@@ -178,7 +182,7 @@ jobs:
             QUERY="host=${ENCODED_HOST}&count=${COUNT}&commit_hash=${COMMIT_HASH}"
           fi
 
-          echo "POST ${URL}?${QUERY}"
+          echo "POST ${URL}?${QUERY//${JENKINS_TOKEN:-__none__}/***}"
 
           curl -sS --fail-with-body --retry 3 --retry-delay 2 --max-time 120 \
             -X POST "${URL}?${QUERY}" \

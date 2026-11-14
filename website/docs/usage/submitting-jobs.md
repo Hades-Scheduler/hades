@@ -18,7 +18,7 @@ http://localhost:8081
 
 ## Authentication
 
-If the API is started with a non-empty `AUTH_KEY`, `POST /build` requires HTTP Basic Auth with username `hades` and the key as the password. If `AUTH_KEY` is empty, the endpoint is open.
+`POST /build` requires HTTP Basic Auth with username `hades` and `AUTH_KEY` as the password. `AUTH_KEY` is required: with an empty key the API exits at start unless `ALLOW_UNAUTHENTICATED=true` (local development only). Request bodies are capped at 1 MiB (413 above) and an empty `steps` list, a step id outside 1..2147483647, a step without `image` duplicate step ids, more than 100 steps, a `cpu_limit` above 1024 or a `memory_limit` or `memory_swap` above 1T get 400.
 
 ## Job Payload Structure
 
@@ -57,6 +57,7 @@ If the API is started with a non-empty `AUTH_KEY`, `POST /build` requires HTTP B
 
 ```bash
 curl -X POST http://localhost:8081/build \
+  -u "hades:$AUTH_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Hello World",
@@ -78,6 +79,7 @@ Steps run sequentially. Each step runs in its own container but shares a common 
 
 ```bash
 curl -X POST http://localhost:8081/build \
+  -u "hades:$AUTH_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Multi-Step Example",
@@ -97,6 +99,7 @@ react the moment a job ends - the Artemis integration, a code-review bot - set
 
 ```bash
 curl -X POST http://localhost:8081/build \
+  -u "hades:$AUTH_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Graded Exercise",

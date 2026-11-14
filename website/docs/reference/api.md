@@ -19,7 +19,7 @@ The raw specs are also available as JSON: [`/openapi/hades-api.json`](/openapi/h
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/ping` | none | Liveness probe. |
-| `POST` | `/build` | Basic (when `AUTH_KEY` set) | Validate and enqueue a job. Returns `{ "message", "job_id" }`. |
+| `POST` | `/build` | Basic | Validate and enqueue a job. Returns `{ "message", "job_id" }`. |
 
 See [Submitting Jobs](../usage/submitting-jobs) for the payload schema and examples, and the [interactive reference](/api/hades) for the full contract.
 

@@ -8,18 +8,29 @@
 
 - name: Create hades config env file
   become: true
+  no_log: true
   ansible.builtin.template:
     src: hades.env.j2
     dest: /opt/hades/api/.env
-    mode: 0644
+    mode: "0600"
+  notify: Restart hades api
+
+- name: Add nats auth config
+  become: true
+  no_log: true
+  ansible.builtin.template:
+    src: nats-auth.conf.j2
+    dest: /opt/hades/api/nats-auth.conf
+    mode: "0600"
   notify: Restart hades api
 
 - name: Add hades api docker compose
   become: true
+  no_log: true
   ansible.builtin.template:
     src: docker-compose-api.yml.j2
     dest: /opt/hades/api/docker-compose.yml
-    mode: 0644
+    mode: "0600"
   notify: Restart hades api
 
 - name: Pull new api docker image

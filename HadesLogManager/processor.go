@@ -27,6 +27,11 @@ const (
 	// A job still running past it loses only its in-memory copy: its terminal
 	// status replays the logs from JetStream.
 	staleJobTTL = 24 * time.Hour
+	// evictedContainerID names the placeholder slot that replaces the logs of a
+	// job evicted for the memory budget, so a reader sees why the logs are gone
+	// instead of an empty job.
+	evictedContainerID = "hades-log-manager"
+	evictedMessage     = "logs evicted: log manager memory budget reached"
 )
 
 // NATSLogAggregator implements LogAggregator using in-memory storage for fast log retrieval.
@@ -41,6 +46,13 @@ type NATSLogAggregator struct {
 	targets   sync.Map // jobID (string) -> logTarget, resolved when the watcher starts
 	client    *http.Client
 	cfg       AggregatorConfig
+
+	// mu guards the byte accounting below and serializes AddLog, eviction, flush
+	// and reset so the total never drifts. Readers stay lock-free on the sync.Maps.
+	mu         sync.Mutex
+	jobBytes   map[string]int // jobID -> stored message bytes
+	totalBytes int
+	dropWarned map[string]bool // jobs whose new lines are being dropped (warned once)
 }
 
 // statusEntry records when a status was last set so jobs that never complete
@@ -61,6 +73,8 @@ type AggregatorConfig struct {
 	BatchSize  int           `env:"LOG_BATCH_SIZE" envDefault:"100"`
 	Retention  time.Duration `env:"LOG_RETENTION" envDefault:"1h"`
 	MaxJobLogs int           `env:"MAX_JOB_LOGS" envDefault:"1000"`
+	// MaxTotalBytes bounds the stored log message bytes across all jobs; 0 disables it.
+	MaxTotalBytes int `env:"LOG_MAX_TOTAL_BYTES" envDefault:"134217728"`
 }
 
 // NewLogAggregator creates a new NATS-based LogAggregator instance with the specified configuration.
@@ -85,7 +99,8 @@ func NewLogAggregator(ctx context.Context, hlc *buildlogs.HadesLogConsumer, reso
 	}
 
 	if client == nil {
-		client = &http.Client{Timeout: httpClientTimeout}
+		allow, _ := parseCallbackAllowlist(nil)
+		client = &http.Client{Timeout: httpClientTimeout, Transport: newCallbackTransport(0, allow), CheckRedirect: noRedirect}
 	}
 
 	la := &NATSLogAggregator{
@@ -93,6 +108,9 @@ func NewLogAggregator(ctx context.Context, hlc *buildlogs.HadesLogConsumer, reso
 		resolver: resolver,
 		client:   client,
 		cfg:      config,
+
+		jobBytes:   make(map[string]int),
+		dropWarned: make(map[string]bool),
 	}
 
 	// Start background cleanup goroutine
@@ -152,6 +170,17 @@ func (la *NATSLogAggregator) AddLog(log buildlogs.Log) {
 
 	slog.Debug("Adding log to aggregator", "job_id", log.JobID, "container_id", log.ContainerID, "entries", len(log.Logs))
 
+	la.mu.Lock()
+	defer la.mu.Unlock()
+	if need := la.netNewBytes(log); la.cfg.MaxTotalBytes > 0 && need > 0 && !la.makeRoom(log.JobID, need) {
+		// Keep the container slot (steps are positional) but drop the lines.
+		if !la.dropWarned[log.JobID] {
+			la.dropWarned[log.JobID] = true
+			slog.Warn("Log memory budget reached by running jobs; dropping new log lines", "job_id", log.JobID, "budget", la.cfg.MaxTotalBytes)
+		}
+		log.Logs = nil
+	}
+
 	// Use LoadOrStore and CompareAndSwap for thread-safe updates. Load first so
 	// the empty placeholder is only allocated for a job's very first log.
 	for {
@@ -197,11 +226,87 @@ func (la *NATSLogAggregator) AddLog(log buildlogs.Log) {
 
 		// Atomically swap if the value hasn't changed
 		if la.logs.CompareAndSwap(log.JobID, old, newVal) {
+			b := 0
+			for _, l := range newLogs {
+				b += entriesBytes(l.Logs)
+			}
+			la.totalBytes += b - la.jobBytes[log.JobID]
+			la.jobBytes[log.JobID] = b
 			slog.Debug("Merged log into aggregator", "job_id", log.JobID, "container_id", log.ContainerID, "containers", len(newLogs))
 			break
 		}
 		// If swap failed, another goroutine modified the value - retry
 	}
+}
+
+// netNewBytes is how much AddLog grows the job's memory use: the incoming bytes
+// minus what trimming the container to MaxJobLogs drops from its oldest entries.
+// Without this, a container at its cap could never replace old lines once the
+// budget is full. Callers hold la.mu.
+func (la *NATSLogAggregator) netNewBytes(log buildlogs.Log) int {
+	need := entriesBytes(log.Logs)
+	if la.cfg.MaxJobLogs <= 0 {
+		return need
+	}
+	value, ok := la.logs.Load(log.JobID)
+	if !ok {
+		return need
+	}
+	var prev []buildlogs.LogEntry
+	for _, l := range *value.(logsVersion).ptr {
+		if l.ContainerID == log.ContainerID {
+			prev = l.Logs
+			break
+		}
+	}
+	combined := append(append([]buildlogs.LogEntry(nil), prev...), log.Logs...)
+	if drop := len(combined) - la.cfg.MaxJobLogs; drop > 0 {
+		need -= entriesBytes(combined[:drop])
+	}
+	return need
+}
+
+func entriesBytes(entries []buildlogs.LogEntry) int {
+	n := 0
+	for _, e := range entries {
+		n += len(e.Message)
+	}
+	return n
+}
+
+// makeRoom evicts the logs of the oldest completed jobs (never keep's own) until
+// need more bytes fit in the budget. It reports false when nothing evictable is
+// left and the budget would still be exceeded. Callers hold la.mu.
+func (la *NATSLogAggregator) makeRoom(keep string, need int) bool {
+	for la.totalBytes+need > la.cfg.MaxTotalBytes {
+		var oldestID string
+		var oldest time.Time
+		la.completed.Range(func(key, value any) bool {
+			id, at := key.(string), value.(time.Time)
+			if id != keep && la.jobBytes[id] > 0 && (oldestID == "" || at.Before(oldest)) {
+				oldestID, oldest = id, at
+			}
+			return true
+		})
+		if oldestID == "" {
+			return false
+		}
+		freed := la.jobBytes[oldestID]
+		marker := []buildlogs.Log{{JobID: oldestID, ContainerID: evictedContainerID, Logs: []buildlogs.LogEntry{
+			{Timestamp: time.Now(), Message: evictedMessage, OutputStream: "stderr"},
+		}}}
+		la.logs.Store(oldestID, logsVersion{ptr: &marker})
+		la.release(oldestID)
+		slog.Warn("Evicted completed job logs for memory budget", "job_id", oldestID, "freed_bytes", freed)
+	}
+	return true
+}
+
+// release forgets a job's byte accounting. Callers hold la.mu.
+func (la *NATSLogAggregator) release(jobID string) {
+	la.totalBytes -= la.jobBytes[jobID]
+	delete(la.jobBytes, jobID)
+	delete(la.dropWarned, jobID)
 }
 
 // trimContainerEntries caps a single container's entries at MaxJobLogs, dropping
@@ -225,7 +330,12 @@ func (la *NATSLogAggregator) trimContainerEntries(jobID, containerID string, ent
 // Returns:
 //   - error: Always nil in current implementation
 func (la *NATSLogAggregator) FlushJob(jobID string) error {
+	// Release and delete under one lock, or a concurrent AddLog could re-charge
+	// logs that are about to be deleted and leak that budget.
+	la.mu.Lock()
+	la.release(jobID)
 	value, logsExists := la.logs.LoadAndDelete(jobID)
+	la.mu.Unlock()
 	if logsExists {
 		v := value.(logsVersion)
 		logs := *v.ptr
@@ -249,7 +359,10 @@ func (la *NATSLogAggregator) FlushJob(jobID string) error {
 // mark, since a job that is watched again is running and the retention sweep
 // would otherwise flush it mid-run.
 func (la *NATSLogAggregator) ResetJobLogs(jobID string) {
+	la.mu.Lock()
+	la.release(jobID)
 	la.logs.Delete(jobID)
+	la.mu.Unlock()
 	la.completed.Delete(jobID)
 }
 

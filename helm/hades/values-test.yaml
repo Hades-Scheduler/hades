@@ -3,6 +3,12 @@
 # Only non-secret configuration lives here; credentials are injected as
 # Kubernetes Secrets (hades-auth, hades-dashboard) created by the deploy workflow.
 
+hadesLogManager:
+  # Callbacks must not reach the cluster nodes either (same list as
+  # networkPolicy.jobPods.blockedCIDRs below; pods and services are covered by
+  # the built-in list).
+  callbackBlockedCIDRs: "131.159.88.18/31,131.159.88.26/31,131.159.88.28/31,131.159.88.43/32,131.159.88.52/30,131.159.88.56/29,131.159.88.67/32,131.159.88.68/30,131.159.88.75/32,131.159.88.76/30"
+
 hadesApi:
   # Protect the /build endpoint with the AUTH_KEY from the hades-auth Secret.
   authKeySecret: hades-auth
@@ -33,3 +39,28 @@ nats:
   # values.yaml hardcodes the "hades" namespace in the NATS service FQDN, so the
   # test namespace must point at its own NATS release (hades-nats.<namespace>).
   host: hades-nats.hades-test.svc.cluster.local
+
+# Job pods run untrusted code: keep them away from NATS, the log manager and the
+# other Hades pods. The cluster CNI (Calico) matches ipBlock rules against pod
+# IPs, so the pod network has to be excluded from the "outside" rule explicitly.
+networkPolicy:
+  enabled: true
+  jobPods:
+    ingressNamespaces:
+      - ingress-nginx
+    blockedCIDRs:
+      - 198.18.0.0/15
+      # Node addresses of the test cluster (API server, kubelet, etcd, SSH and
+      # node-exporter ports are otherwise reachable from job pods). The ingress
+      # load balancers share the subnet and must stay reachable, hence no /24.
+      # Keep in sync when nodes are added.
+      - 131.159.88.18/31
+      - 131.159.88.26/31
+      - 131.159.88.28/31
+      - 131.159.88.43/32
+      - 131.159.88.52/30
+      - 131.159.88.56/29
+      - 131.159.88.67/32
+      - 131.159.88.68/30
+      - 131.159.88.75/32
+      - 131.159.88.76/30

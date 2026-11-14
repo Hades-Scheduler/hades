@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ import (
 	hadesnats "github.com/hades-scheduler/hades/shared/nats"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -79,6 +81,72 @@ type OperatorConfig struct {
 	// if-not-present or never. If empty, Kubernetes pulls :latest and untagged
 	// images on every step.
 	ImagePullPolicy string `env:"K8S_IMAGE_PULL_POLICY"`
+	// Defaults for what a job leaves unset. Empty or 0 disables each one. These
+	// carry no envDefault tag: the env library swaps an explicitly empty value for
+	// the default, which would make disabling impossible. applyUnsetJobDefaults
+	// sets them only when the variable is absent.
+	JobDefaultTimeoutSeconds int64  `env:"JOB_DEFAULT_TIMEOUT_SECONDS"`
+	JobMaxTimeoutSeconds     int64  `env:"JOB_MAX_TIMEOUT_SECONDS" envDefault:"0"`
+	JobDefaultCPULimit       string `env:"JOB_DEFAULT_CPU_LIMIT"`
+	JobDefaultMemoryLimit    string `env:"JOB_DEFAULT_MEMORY_LIMIT"`
+	JobMaxCPULimit           string `env:"JOB_MAX_CPU_LIMIT"`
+	JobMaxMemoryLimit        string `env:"JOB_MAX_MEMORY_LIMIT"`
+	JobSharedVolumeSizeLimit string `env:"JOB_SHARED_VOLUME_SIZE_LIMIT"`
+}
+
+// applyUnsetJobDefaults fills the job defaults of variables that are not set at
+// all. A variable set to the empty string stays empty and disables its default.
+func (c *OperatorConfig) applyUnsetJobDefaults() {
+	unset := func(k string) bool { _, ok := os.LookupEnv(k); return !ok }
+	if unset("JOB_DEFAULT_TIMEOUT_SECONDS") {
+		c.JobDefaultTimeoutSeconds = 3600
+	}
+	if unset("JOB_DEFAULT_CPU_LIMIT") {
+		c.JobDefaultCPULimit = "2"
+	}
+	if unset("JOB_DEFAULT_MEMORY_LIMIT") {
+		c.JobDefaultMemoryLimit = "4Gi"
+	}
+	if unset("JOB_MAX_CPU_LIMIT") {
+		c.JobMaxCPULimit = "16"
+	}
+	if unset("JOB_MAX_MEMORY_LIMIT") {
+		c.JobMaxMemoryLimit = "32Gi"
+	}
+	if unset("JOB_SHARED_VOLUME_SIZE_LIMIT") {
+		c.JobSharedVolumeSizeLimit = "10Gi"
+	}
+}
+
+// parseQuantity parses an optional Kubernetes quantity; empty means unset.
+func parseQuantity(name, v string) (*resource.Quantity, error) {
+	if strings.TrimSpace(v) == "" {
+		return nil, nil
+	}
+	q, err := resource.ParseQuantity(strings.TrimSpace(v))
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", name, v, err)
+	}
+	return &q, nil
+}
+
+func (c *OperatorConfig) jobDefaults() (controller.JobDefaults, error) {
+	d := controller.JobDefaults{TimeoutSeconds: c.JobDefaultTimeoutSeconds, MaxTimeoutSeconds: c.JobMaxTimeoutSeconds}
+	var err error
+	if d.CPULimit, err = parseQuantity("JOB_DEFAULT_CPU_LIMIT", c.JobDefaultCPULimit); err != nil {
+		return d, err
+	}
+	if d.MemoryLimit, err = parseQuantity("JOB_DEFAULT_MEMORY_LIMIT", c.JobDefaultMemoryLimit); err != nil {
+		return d, err
+	}
+	if d.MaxCPULimit, err = parseQuantity("JOB_MAX_CPU_LIMIT", c.JobMaxCPULimit); err != nil {
+		return d, err
+	}
+	if d.MaxMemoryLimit, err = parseQuantity("JOB_MAX_MEMORY_LIMIT", c.JobMaxMemoryLimit); err != nil {
+		return d, err
+	}
+	d.SharedVolumeSizeLimit, err = parseQuantity("JOB_SHARED_VOLUME_SIZE_LIMIT", c.JobSharedVolumeSizeLimit)
+	return d, err
 }
 
 // normalize replaces non-positive tuning values with their defaults. A
@@ -175,10 +243,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	operatorConfig.applyUnsetJobDefaults()
 	operatorConfig.normalize()
 	pullPolicy, err := controller.ParseImagePullPolicy(operatorConfig.ImagePullPolicy)
 	if err != nil {
 		setupLog.Error(err, "invalid K8S_IMAGE_PULL_POLICY")
+		os.Exit(1)
+	}
+	jobDefaults, err := operatorConfig.jobDefaults()
+	if err != nil {
+		setupLog.Error(err, "invalid job default")
 		os.Exit(1)
 	}
 
@@ -247,6 +321,11 @@ func main() {
 		"log_drain_timeout", operatorConfig.LogDrainTimeout,
 		"finalizer_image", operatorConfig.FinalizerImage,
 		"image_pull_policy", operatorConfig.ImagePullPolicy,
+		"job_default_timeout_seconds", operatorConfig.JobDefaultTimeoutSeconds,
+		"job_max_timeout_seconds", operatorConfig.JobMaxTimeoutSeconds,
+		"job_default_cpu_limit", operatorConfig.JobDefaultCPULimit,
+		"job_default_memory_limit", operatorConfig.JobDefaultMemoryLimit,
+		"job_shared_volume_size_limit", operatorConfig.JobSharedVolumeSizeLimit,
 		"metrics_addr", metricsAddr,
 		"dev_mode", enableDevMode,
 		"nats_url", natsConfig.URL,
@@ -281,6 +360,7 @@ func main() {
 		RequeueDelay:     operatorConfig.RequeueDelay,
 		LogDrainTimeout:  operatorConfig.LogDrainTimeout,
 		FinalizerImage:   operatorConfig.FinalizerImage,
+		JobDefaults:      jobDefaults,
 		ImagePullPolicy:  pullPolicy,
 		Publisher:        publisher,
 		LogStreams:       controller.NewLogStreamRegistry(),

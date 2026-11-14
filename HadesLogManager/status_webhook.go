@@ -159,8 +159,12 @@ type httpWebhookSender struct {
 }
 
 // newHTTPWebhookSender builds a sender bounded by timeout. transport may be nil,
-// in which case http.DefaultTransport is used.
+// in which case a transport that blocks internal targets is used.
 func newHTTPWebhookSender(timeout time.Duration, transport http.RoundTripper) *httpWebhookSender {
+	if transport == nil {
+		allow, _ := parseCallbackAllowlist(nil)
+		transport = newCallbackTransport(0, allow)
+	}
 	return &httpWebhookSender{client: &http.Client{
 		Timeout:   timeout,
 		Transport: transport,

@@ -227,8 +227,11 @@ live feed - continue to receive every event unchanged.
 | `HADESLOGMANAGER_API_PORT` | `8081` | HTTP API port.                                 |
 | `LOG_BATCH_SIZE`         | `100`    | Log entries buffered before a flush.           |
 | `LOG_RETENTION`          | `1h`     | How long completed job logs are kept in memory.|
+| `LOG_MAX_TOTAL_BYTES`    | `134217728` | Total log message bytes kept across all jobs (`0` = unbounded). Past it the logs of the oldest completed jobs are evicted (status stays; `GET /jobs/:id/logs` then returns a "logs evicted" entry); if only running jobs hold the budget, new lines are dropped. Heap use is a few times this value. |
 | `MAX_JOB_LOGS`           | `1000`   | Max log entries retained per container of a job (oldest drop first; container slots are never removed). |
 | `LOG_WATCHER_MAX_LIFETIME` | `6h`   | Longest a job's live log watcher runs without a terminal status, for jobs without `timeout_seconds` (jobs with one use it plus 10m). Also used when the job's `HADES_JOBS` entry can't be read. Past it, live logs stop updating; the full log is replayed when the job finishes. |
+| `CALLBACK_ALLOWED_HOSTS` |          | Comma-separated host names, IPs or CIDRs exempt from the callback address block (see below). |
+| `CALLBACK_BLOCKED_CIDRS` |          | Comma-separated CIDRs to refuse on top of the built-in list (see below). |
 | `DEBUG`                  | `false`  | Enable verbose (debug-level) logging.          |
 
 The forwarding destination is no longer a global env var. Each job sets its own
@@ -236,6 +239,23 @@ The forwarding destination is no longer a global env var. Each job sets its own
 `HADES_JOBS` JetStream KV store when the job's watcher starts, or when forwarding
 if it was not prefetched. Jobs without a `callback_url`
 are not forwarded.
+
+### Callback address restrictions
+
+Callbacks (`callback_url`, `status_callback_url`) to loopback, private (RFC 1918,
+`fc00::/7`), CGNAT (`100.64.0.0/10`), link-local (including `169.254.169.254`),
+unspecified, multicast and other special-purpose addresses (benchmarking
+`198.18.0.0/15`, documentation, reserved, NAT64, 6to4, Teredo) are refused at
+connect time. The built-in list cannot know a cluster's pod and service ranges
+when those use public-looking addresses; list them in `CALLBACK_BLOCKED_CIDRS`
+(Helm: `hadesLogManager.callbackBlockedCIDRs`). Set
+`CALLBACK_ALLOWED_HOSTS` (Helm: `hadesLogManager.callbackAllowedHosts`) to exempt
+internal receivers such as Artemis in the same cluster or compose network. A host
+name entry must equal the host in the callback URL and trusts whatever it resolves
+to. An allowlist entry wins over both the built-in list and
+`CALLBACK_BLOCKED_CIDRS`. The log callback does not follow redirects, and HTTP proxy environment
+variables are ignored. A blocked status webhook is logged as an error and not
+retried.
 
 ### Job-status webhook
 

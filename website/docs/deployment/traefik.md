@@ -13,7 +13,7 @@ The Traefik setup uses Docker Compose and consists of two compose files that are
 | File | Purpose |
 |---|---|
 | `compose.yml` | Core Hades services (API, Scheduler, NATS) |
-| `docker-compose.deploy.yml` | Adds Traefik reverse proxy with TLS and removes host port bindings |
+| `docker-compose.deploy.yml` | Adds Traefik reverse proxy with TLS and removes the host port bindings of every service except Traefik |
 
 Traefik handles:
 - HTTP → HTTPS redirect (port 80 → 443)
@@ -44,11 +44,14 @@ cp .env.example .env
 Edit `.env` and set the following values:
 
 ```env
-# Your email address — Let's Encrypt will send certificate expiry notices here
+# Your email address - Let's Encrypt will send certificate expiry notices here
 LETSENCRYPT_EMAIL=you@example.com
 
 # The public domain name for the Hades API
 HADES_API_HOST=hades.example.com
+
+# Required: Basic Auth key for POST /build (user "hades"); compose refuses to start without it
+AUTH_KEY=<output of: openssl rand -hex 32>
 ```
 
 ### 3. Create the Traefik ACME Storage File
@@ -73,10 +76,13 @@ docker compose -f compose.yml -f docker-compose.deploy.yml up -d
 ```
 
 This starts:
-- **Traefik** on ports 80 and 443 — handles TLS termination and routing
-- **hadesAPI** — exposed only internally (no host port binding)
-- **hadesScheduler** — connected to the Docker socket
-- **nats** — internal only
+- **Traefik** on ports 80 and 443 - handles TLS termination and routing
+- **hadesAPI** - reachable only through Traefik (no host port binding)
+- **hadesScheduler** - connected to the Docker socket
+- **nats** - internal only (no host port binding; it has no authentication, so never publish it)
+- **hadesLogManager** and **jaeger** - internal only, not routed through Traefik
+
+The log manager has no authentication of its own and is not exposed. The dashboard reads logs through its authenticated proxy.
 
 ## How It Works
 
@@ -114,7 +120,7 @@ certificatesResolvers:
 ```
 
 Key points:
-- `exposedByDefault: false` — only services with the `traefik.enable=true` label are exposed.
+- `exposedByDefault: false` - only services with the `traefik.enable=true` label are exposed.
 - The `web` entrypoint automatically redirects all HTTP traffic to HTTPS.
 - The `letsencrypt` resolver uses the **HTTP-01 challenge** over port 80 to verify domain ownership.
 
@@ -147,7 +153,7 @@ labels:
 docker compose -f compose.yml -f docker-compose.deploy.yml ps
 ```
 
-All services should show `running`. Traefik may take 30–60 seconds on first start to issue a certificate.
+All services should show `running`. Traefik may take 30-60 seconds on first start to issue a certificate.
 
 ### Test HTTPS
 
@@ -158,7 +164,9 @@ curl https://hades.example.com/ping
 Or submit a test job:
 
 ```bash
+AUTH_KEY=<the AUTH_KEY from .env>
 curl -X POST https://hades.example.com/build \
+  -u "hades:$AUTH_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Traefik Test",

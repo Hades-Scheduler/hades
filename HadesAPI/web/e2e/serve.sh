@@ -50,6 +50,7 @@ API_BIN="$(mktemp -t hades-e2e-api.XXXXXX)"
 echo "[e2e] starting HadesAPI on :$API_PORT"
 export NATS_URL="nats://localhost:${NATS_PORT}"
 export API_PORT
+export ALLOW_UNAUTHENTICATED=true
 export DASHBOARD_USERNAME="admin"
 # bcrypt hash of "test-password" (see e2e/fixtures.ts).
 export DASHBOARD_PASSWORD_HASH='$2y$10$oKaVlKDJczMUQJyWZxMIGenHvvP.4mIOTPSOHLcIVewfZi6JioAii'

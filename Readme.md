@@ -108,10 +108,16 @@ For production deployments, Hades is designed to run natively within a Kubernete
    Replace `<version>` in the commands below with the chart version you want to
    install (for example `1.0.0`).
 
+   Create the API auth Secret first. `/build` then needs Basic Auth with user `hades` and that key. For throwaway test installs only, `--set hadesApi.allowUnauthenticated=true` skips the Secret.
+
    ```fish
+   kubectl create namespace hades
+   kubectl -n hades create secret generic hades-auth --from-literal=AUTH_KEY=<choose-a-key>
+
    # Install the published chart from GHCR (recommended)
    helm upgrade --install hades oci://ghcr.io/hades-scheduler/charts/hades \
-     --version <version> -n hades --create-namespace
+     --version <version> -n hades --create-namespace \
+     --set hadesApi.authKeySecret=hades-auth
    ```
 
    Or install from a local checkout of this repository:
@@ -119,7 +125,7 @@ For production deployments, Hades is designed to run natively within a Kubernete
    ```fish
    helm repo add nats https://nats-io.github.io/k8s/helm/charts
    helm dependency build ./helm/hades/
-   helm upgrade --install hades ./helm/hades -n hades --create-namespace
+   helm upgrade --install hades ./helm/hades -n hades --create-namespace --set hadesApi.authKeySecret=hades-auth
    ```
 
    > **Note:** Helm does not upgrade CRDs after the first install. When a release
@@ -313,7 +319,10 @@ Login uses a signed, `HttpOnly; Secure; SameSite=Strict` session cookie; all
   `DASHBOARD_COOKIE_INSECURE=true` - never in production.
 - **Set `DASHBOARD_TRUSTED_PROXIES`** to your ingress' address range when behind a
   reverse proxy. Otherwise `X-Forwarded-For` is ignored (the login lockout keys on
-  the direct, un-spoofable address).
+  the direct, un-spoofable address), so all clients share the proxy's address and
+  one lockout; a warning is logged at start.
+- Login allows 5 attempts per client address per 15 minutes, counted before the
+  password check. The login body is capped at 4 KiB.
 - Responses carry `Content-Security-Policy`, `X-Frame-Options: DENY`,
   `X-Content-Type-Options: nosniff`, and HSTS.
 
@@ -325,7 +334,9 @@ variables and routinely carries credentials. The dashboard redacts it
 sensitive (`token`, `password`, `secret`, ...) **or** the value itself looks like a
 secret (credentials embedded in a URL, a PEM block, a JWT, a high-entropy token).
 Step **scripts** are scanned with the same heuristics and have inline secrets
-masked. Keys stay visible so operators can see which variables exist;
+masked: Bearer/Basic authorization headers, token-only URL credentials,
+`--password <v>` style flags, `docker login -p <v>`, and every masked metadata
+value that appears in the script. Put secrets in `metadata`, not in scripts. Keys stay visible so operators can see which variables exist;
 `SECRET_REDACT_MODE=all` masks every metadata value.
 
 **Residual exposure (by design):** job **logs** are shown *verbatim* - streamed live
@@ -360,12 +371,28 @@ Hades is configured through environment variables (or a `.env` file for local ru
 | `HADES_EXECUTOR` | Execution platform: `docker` or `k8s` | `docker` |
 | `CONCURRENCY` | Number of jobs to process concurrently | `1` |
 | `API_PORT` | Port for the Hades API | `8080` |
-| `AUTH_KEY` | HTTP Basic Auth key for the API (empty = no auth) | `` |
+| `AUTH_KEY` | HTTP Basic Auth key for the API (required; the API exits at start when empty unless `ALLOW_UNAUTHENTICATED=true`) | `` |
+| `ALLOW_UNAUTHENTICATED` | Serve `/build` without auth when `AUTH_KEY` is empty (local development only; `make run` sets it) | `false` |
 | `NATS_URL` | NATS server URL | `nats://localhost:4222` |
 | `DEBUG` | Verbose (debug-level) logging | `false` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint for tracing (empty = tracing off) | `` |
 
 See **[docs/configuration.md](./docs/configuration.md)** for the complete, per-component reference (Docker/Kubernetes executor, operator, and Log Manager options). A ready-to-copy `.env.example` lives at the repository root.
+
+### Upgrade notes
+
+#### Security hardening (unreleased)
+
+Breaking changes:
+
+- `AUTH_KEY` is required. The API exits at start with an empty key unless `ALLOW_UNAUTHENTICATED=true` (local development only). In Helm, an empty `hadesApi.authKeySecret` now needs `hadesApi.allowUnauthenticated: true`.
+- Callbacks (`callback_url`, `status_callback_url`) to loopback, private, CGNAT, link-local, unspecified, multicast and other special-purpose addresses (for example `198.18.0.0/15`) are refused. List internal receivers (for example Artemis in the same cluster or compose network) in `CALLBACK_ALLOWED_HOSTS` (Helm: `hadesLogManager.callbackAllowedHosts`). The log callback no longer follows redirects and callbacks ignore HTTP proxy variables. The built-in list cannot know a cluster's pod and service ranges when those use public-looking addresses; list them in `CALLBACK_BLOCKED_CIDRS` (comma-separated CIDRs, Helm: `hadesLogManager.callbackBlockedCIDRs`). An entry in `CALLBACK_ALLOWED_HOSTS` still wins over it.
+- Docker executor: steps may only request the network modes in `DOCKER_ALLOWED_NETWORKS` (default `none,bridge,default`). `host` and named networks fail the job unless listed.
+- `/build` bodies are capped at 1 MiB (413 above) and duplicate step ids, more than 100 steps and cpu or memory limits above 1024 cores or 1T are rejected with 400. The operator also caps a step at `JOB_MAX_CPU_LIMIT` (16) and `JOB_MAX_MEMORY_LIMIT` (32Gi) and fails a job the API server cannot create instead of retrying it.
+- `compose.yml` requires `AUTH_KEY` in `.env` and publishes API, log manager, NATS and Jaeger on `127.0.0.1` only. `docker-compose.deploy.yml` publishes only Traefik on 80/443 (Compose 2.24 or later) and no longer routes the log manager publicly.
+- Kubernetes: job pods no longer mount a service account token and run with the `RuntimeDefault` seccomp profile and `allowPrivilegeEscalation: false`. The operator role has no access to secrets or configmaps. `hadesOperator.DeleteOnComplete` now defaults to `true`. Optional `networkPolicy.enabled` (default `false`) is new.
+- Kubernetes: jobs now get a default 1 h timeout, 2 CPU and 4Gi memory limits per step, a 10Gi shared volume and no `NET_RAW`/`MKNOD` capabilities or service-link variables. Change or disable the defaults with `hadesOperator.jobDefaultTimeoutSeconds`, `jobMaxTimeoutSeconds`, `jobDefaultCPULimit`, `jobDefaultMemoryLimit` and `jobSharedVolumeSizeLimit` (empty or `0` disables each).
+- Dashboard login allows 5 attempts per client address per 15 minutes. Behind a reverse proxy, set `DASHBOARD_TRUSTED_PROXIES`.
 
 ### Measuring Hades overhead
 
@@ -488,7 +515,7 @@ Checklist when cutting a chart release:
    the updated `Chart.lock`. CI vendors the subchart at package time; the
    `charts/` directory itself is not committed.
 5. **Validate before merging**: `helm lint helm/hades`,
-   `helm template helm/hades`, and ideally a throwaway
+   `helm template helm/hades --set hadesApi.authKeySecret=hades-auth`, and ideally a throwaway
    `helm install` in a scratch namespace.
 6. **Package visibility**: the GHCR chart package must be **public** for
    anonymous `helm install` (same as the container images). Set once in the org

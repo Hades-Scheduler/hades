@@ -27,6 +27,8 @@ const (
 	// maxFailureEntries bounds the lockout map so a client rotating its source
 	// key cannot grow it without limit (memory DoS).
 	maxFailureEntries = 4096
+	// maxLoginBodyBytes caps the login request body.
+	maxLoginBodyBytes = 4 << 10
 )
 
 // authenticator verifies credentials and mints/validates signed session cookies.
@@ -81,15 +83,11 @@ func (a *authenticator) verifyCredentials(username, password string) bool {
 	return userOK && passOK
 }
 
-// locked reports whether key (client IP) is currently locked out.
-func (a *authenticator) locked(key string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	fs := a.failures[key]
-	return fs != nil && fs.count >= maxFailedAttempts && time.Now().Before(fs.until)
-}
-
-func (a *authenticator) recordFailure(key string) {
+// reserve counts a login attempt for key before its password is verified, so
+// parallel requests cannot evaluate more than maxFailedAttempts guesses per
+// window. It returns false when key is locked out. A successful login clears
+// the count via recordSuccess.
+func (a *authenticator) reserve(key string) bool {
 	now := time.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -103,18 +101,21 @@ func (a *authenticator) recordFailure(key string) {
 	}
 
 	fs := a.failures[key]
-	if fs == nil || now.After(fs.until) {
+	if fs == nil {
 		if len(a.failures) >= maxFailureEntries {
-			// Hard cap reached (all entries still within the window): refuse to
-			// track new keys rather than grow unbounded. Existing locked-out
-			// keys keep their state.
-			return
+			// Hard cap reached (all entries still within the window): an attempt
+			// that cannot be counted is refused, otherwise new keys would get
+			// unlimited guesses.
+			return false
 		}
 		fs = &failureState{}
 		a.failures[key] = fs
+	} else if fs.count >= maxFailedAttempts {
+		return false
 	}
 	fs.count++
 	fs.until = now.Add(lockoutWindow)
+	return true
 }
 
 func (a *authenticator) recordSuccess(key string) {
@@ -176,19 +177,19 @@ type loginRequest struct {
 
 func (s *Server) handleLogin(c *gin.Context) {
 	key := c.ClientIP()
-	if s.auth.locked(key) {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many failed attempts, try again later"})
-		return
-	}
-
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxLoginBodyBytes)
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 
+	if !s.auth.reserve(key) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many failed attempts, try again later"})
+		return
+	}
+
 	if !s.auth.verifyCredentials(req.Username, req.Password) {
-		s.auth.recordFailure(key)
 		// Deliberately do not log the submitted username (avoid recording
 		// credential-guessing input / PII in logs).
 		slog.Warn("Dashboard login failed", "client_ip", key)

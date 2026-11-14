@@ -106,7 +106,7 @@ func startDispatcher(t *testing.T, ctx context.Context, cfg StatusWebhookConfig)
 	kv, err := js.CreateOrUpdateKeyValue(ctx, hadesnats.JobsKVConfig())
 	require.NoError(t, err)
 
-	dispatcher := NewStatusWebhookDispatcher(js, newKVCallbackResolver(kv), nil, cfg)
+	dispatcher := NewStatusWebhookDispatcher(js, newKVCallbackResolver(kv), newHTTPWebhookSender(cfg.Timeout, loopbackTransport(t)), cfg)
 
 	done := make(chan struct{})
 	go func() {

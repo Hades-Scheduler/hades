@@ -25,16 +25,16 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
-  actions: write
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.work
           cache-dependency-path: "**/*.sum"
@@ -53,9 +53,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.work
           cache-dependency-path: "**/*.sum"
@@ -79,9 +81,11 @@ jobs:
           - name: HadesOperator
             path: HadesScheduler/HadesOperator
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.work
           cache-dependency-path: "**/*.sum"
@@ -91,7 +95,7 @@ jobs:
         run: cd ${{ matrix.path }} && go test ./... -json > "${{ github.workspace }}/TestResults-${{ matrix.name }}.json"
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: Go-results-${{ matrix.name }}
           path: TestResults-${{ matrix.name }}.json
@@ -99,11 +103,11 @@ jobs:
   ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -120,7 +124,10 @@ jobs:
   build-api:
     needs: [lint, build, test, ui]
     if: github.actor != 'dependabot[bot]'
-    uses: ls1intum/.github/.github/workflows/build-and-push-docker-image.yml@v1.2.0
+    uses: ls1intum/.github/.github/workflows/build-and-push-docker-image.yml@ee1b52f07891ed489887681c09c52b4a83fa9fb2 # v1.2.0
+    permissions:
+      contents: read
+      packages: write
     with:
       image-name: hades-scheduler/hades/hades-api
       docker-file: ./HadesAPI/Dockerfile
@@ -128,12 +135,14 @@ jobs:
         type=semver,pattern={{version}}
         type=semver,pattern={{major}}.{{minor}}
         type=raw,value=latest,enable={{is_default_branch}}
-    secrets: inherit
 
   build-scheduler:
     needs: [lint, build, test]
     if: github.actor != 'dependabot[bot]'
-    uses: ls1intum/.github/.github/workflows/build-and-push-docker-image.yml@v1.2.0
+    uses: ls1intum/.github/.github/workflows/build-and-push-docker-image.yml@ee1b52f07891ed489887681c09c52b4a83fa9fb2 # v1.2.0
+    permissions:
+      contents: read
+      packages: write
     with:
       image-name: hades-scheduler/hades/hades-scheduler
       docker-file: ./HadesScheduler/Dockerfile
@@ -141,12 +150,14 @@ jobs:
         type=semver,pattern={{version}}
         type=semver,pattern={{major}}.{{minor}}
         type=raw,value=latest,enable={{is_default_branch}}
-    secrets: inherit
 
   build-operator:
     needs: [lint, build, test]
     if: github.actor != 'dependabot[bot]'
-    uses: ls1intum/.github/.github/workflows/build-and-push-docker-image.yml@v1.2.0
+    uses: ls1intum/.github/.github/workflows/build-and-push-docker-image.yml@ee1b52f07891ed489887681c09c52b4a83fa9fb2 # v1.2.0
+    permissions:
+      contents: read
+      packages: write
     with:
       image-name: hades-scheduler/hades/hades-operator
       docker-file: ./HadesScheduler/HadesOperator/Dockerfile
@@ -154,12 +165,14 @@ jobs:
         type=semver,pattern={{version}}
         type=semver,pattern={{major}}.{{minor}}
         type=raw,value=latest,enable={{is_default_branch}}
-    secrets: inherit
 
   build-log-manager:
     needs: [lint, build, test]
     if: github.actor != 'dependabot[bot]'
-    uses: ls1intum/.github/.github/workflows/build-and-push-docker-image.yml@v1.2.0
+    uses: ls1intum/.github/.github/workflows/build-and-push-docker-image.yml@ee1b52f07891ed489887681c09c52b4a83fa9fb2 # v1.2.0
+    permissions:
+      contents: read
+      packages: write
     with:
       image-name: hades-scheduler/hades/hades-log-manager
       docker-file: ./HadesLogManager/Dockerfile
@@ -167,4 +180,3 @@ jobs:
         type=semver,pattern={{version}}
         type=semver,pattern={{major}}.{{minor}}
         type=raw,value=latest,enable={{is_default_branch}}
-    secrets: inherit

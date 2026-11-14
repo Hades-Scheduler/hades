@@ -24,14 +24,14 @@ run: docker-run-nats docker-run-jaeger ## Run api, scheduler, and logmanager loc
 	@# OTEL endpoint points at the Jaeger container published on the host.
 	@trap 'kill 0' INT TERM EXIT; \
 		export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317; \
-		(cd HadesAPI       && METRICS_PORT=8082 go run .) & \
+		(cd HadesAPI       && ALLOW_UNAUTHENTICATED=true METRICS_PORT=8082 go run .) & \
 		(cd HadesScheduler && METRICS_PORT=8084 go run .) & \
 		(cd HadesLogManager && METRICS_PORT=8086 go run .) & \
 		wait
 
 .PHONY: run-api
 run-api: ## Run HadesAPI locally via go run.
-	cd HadesAPI && go run .
+	cd HadesAPI && ALLOW_UNAUTHENTICATED=true go run .
 
 .PHONY: run-scheduler
 run-scheduler: ## Run HadesScheduler locally via go run.
@@ -61,11 +61,11 @@ docker-run-scheduler: ## Start only the HadesScheduler service via docker compos
 
 .PHONY: docker-run-nats
 docker-run-nats: ## Start only the NATS service via docker compose.
-	$(COMPOSE) -f $(COMPOSE_FILE) up -d nats
+	AUTH_KEY=$${AUTH_KEY:-unused} $(COMPOSE) -f $(COMPOSE_FILE) up -d nats
 
 .PHONY: docker-run-jaeger
 docker-run-jaeger: ## Start only the Jaeger tracing backend via docker compose (UI on :16686).
-	$(COMPOSE) -f $(COMPOSE_FILE) up -d jaeger
+	AUTH_KEY=$${AUTH_KEY:-unused} $(COMPOSE) -f $(COMPOSE_FILE) up -d jaeger
 
 .PHONY: docker-stop
 docker-stop: ## Stop the local docker compose stack.

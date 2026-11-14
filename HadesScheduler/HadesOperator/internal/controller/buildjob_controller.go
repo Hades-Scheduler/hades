@@ -30,6 +30,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -116,6 +117,103 @@ const (
 	LabelPriority = hades.MetadataKeyPriority
 )
 
+// hardenedContainerContext is the security context of every job container.
+// NET_RAW (packet spoofing) and MKNOD (device nodes) go away; the other default
+// capabilities stay because step images often install packages as root.
+func hardenedContainerContext() *corev1.SecurityContext {
+	f := false
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: &f,
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"NET_RAW", "MKNOD"}},
+	}
+}
+
+// JobDefaults are operator-wide fallbacks for what a job leaves unset, so a job
+// cannot run unbounded. The zero value disables every default.
+type JobDefaults struct {
+	// TimeoutSeconds is the Job's activeDeadlineSeconds when the BuildJob has none.
+	TimeoutSeconds int64
+	// MaxTimeoutSeconds caps the job timeout (also when the job has none). 0 = no cap.
+	MaxTimeoutSeconds int64
+	// CPULimit and MemoryLimit apply per step container for a resource the step
+	// did not set. Nil leaves it unlimited.
+	CPULimit    *resource.Quantity
+	MemoryLimit *resource.Quantity
+	// MaxCPULimit and MaxMemoryLimit cap what a step may ask for, limits and
+	// requests alike (also the defaults above). Nil = no cap.
+	MaxCPULimit    *resource.Quantity
+	MaxMemoryLimit *resource.Quantity
+	// SharedVolumeSizeLimit is the sizeLimit of the shared emptyDir. Nil = none.
+	SharedVolumeSizeLimit *resource.Quantity
+}
+
+// clampQuantity returns max when q is above it and says so in the log, so a
+// job cannot ask for more than the cluster operator allows. Nil on either side
+// returns q unchanged.
+func clampQuantity(q, max *resource.Quantity, what, buildJob string, stepID int32) *resource.Quantity {
+	if q == nil || max == nil || q.Cmp(*max) <= 0 {
+		return q
+	}
+	slog.Info("Clamping step resource to the operator maximum", "buildJob", buildJob, "step", stepID, "resource", what, "requested", q.String(), "max", max.String())
+	return max
+}
+
+// effectiveLimit picks the step's own limit, else the operator default raised to
+// the step's request (Kubernetes rejects a request above its limit), else the
+// operator maximum. The caller clamps the result to the maximum.
+func effectiveLimit(limit, request, def, max *resource.Quantity) *resource.Quantity {
+	if limit != nil {
+		return limit
+	}
+	if def != nil && request != nil && request.Cmp(*def) > 0 {
+		return request
+	}
+	if def != nil {
+		return def
+	}
+	return max
+}
+
+// maxCreateMessage bounds the API server message kept as the failure reason,
+// which for a huge Job can list thousands of field errors.
+const maxCreateMessage = 300
+
+// jobNeverCreatable reports whether retrying the Job create cannot succeed
+// because the API server rejects the object itself.
+func jobNeverCreatable(err error) bool {
+	return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsRequestEntityTooLargeError(err)
+}
+
+func truncateMessage(s string) string {
+	if len(s) <= maxCreateMessage {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxCreateMessage], "") + "..."
+}
+
+// helperResources keeps the finalizer container (it only echoes a line) small.
+func helperResources() corev1.ResourceRequirements {
+	l := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("100m"),
+		corev1.ResourceMemory: resource.MustParse("64Mi"),
+	}
+	return corev1.ResourceRequirements{Limits: l, Requests: l.DeepCopy()}
+}
+
+// effectiveTimeout applies the default and the cap to the job's own timeout.
+func (d JobDefaults) effectiveTimeout(job *int64) *int64 {
+	t := job
+	if t == nil && d.TimeoutSeconds > 0 {
+		v := d.TimeoutSeconds
+		t = &v
+	}
+	if d.MaxTimeoutSeconds > 0 && (t == nil || *t > d.MaxTimeoutSeconds) {
+		v := d.MaxTimeoutSeconds
+		t = &v
+	}
+	return t
+}
+
 // ManagedByValue is the value of the LabelManagedBy label applied to Jobs the
 // operator owns.
 const ManagedByValue = "hades-operator"
@@ -154,6 +252,9 @@ type BuildJobReconciler struct {
 	// FinalizerImage is the image for the pod's main container. Empty falls back
 	// to DefaultFinalizerImage.
 	FinalizerImage string
+
+	// JobDefaults are the timeout, resource and volume fallbacks for jobs.
+	JobDefaults JobDefaults
 
 	// ImagePullPolicy is applied to every step container. Empty leaves it unset,
 	// which keeps Kubernetes' default (Always for :latest or untagged images).
@@ -314,7 +415,7 @@ func positiveOrDefault(d, fallback time.Duration) time.Duration {
 
 // +kubebuilder:rbac:groups=build.hades.tum.de,resources=buildjobs;buildjobs/status;buildjobs/finalizers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods;events;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods;events,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile ensures the cluster state matches the desired state of a BuildJob.
 // It creates/owns a batch Job, updates BuildJob status and each ContainerStatus of the BuildJob, and cleans up on completion.
@@ -548,7 +649,25 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// bj.Spec.Steps), suspended if the limit is reached.
 	active, shouldSuspend, err := r.createJob(ctx, &bj, jobName)
 	if err != nil {
-		return ctrl.Result{}, err
+		if !jobNeverCreatable(err) {
+			return ctrl.Result{}, err
+		}
+		// The API server rejects this Job itself (invalid, too many steps, too
+		// large), so a retry would fail the same way forever. End the BuildJob.
+		slog.Error("Job can never be created; failing BuildJob", "buildJob", bj.Name, "error", err)
+		if _, serr := r.setStatusCompleted(ctx, req.NamespacedName, bj.Name, false, "cannot create Job: "+truncateMessage(err.Error())); serr != nil {
+			if apierrors.IsConflict(serr) {
+				return ctrl.Result{RequeueAfter: conflictRequeueDelay}, nil
+			}
+			return ctrl.Result{}, serr
+		}
+		if r.DeleteOnComplete {
+			policy := metav1.DeletePropagationForeground
+			if derr := r.Delete(ctx, &bj, &client.DeleteOptions{PropagationPolicy: &policy}); derr != nil && !apierrors.IsNotFound(derr) {
+				return ctrl.Result{}, derr
+			}
+		}
+		return ctrl.Result{}, nil
 	}
 
 	// 3.3.1 Initialize container statuses
@@ -597,7 +716,7 @@ func (r *BuildJobReconciler) createJob(ctx context.Context, bj *buildv1.BuildJob
 	active = r.admission.activeCount(bj.Namespace, jobs, time.Now())
 	suspended = active >= r.MaxParallelism
 
-	k8sJob := buildK8sJob(bj, jobName, r.DeleteOnComplete, suspended, r.finalizerImage(), r.ImagePullPolicy)
+	k8sJob := buildK8sJob(bj, jobName, r.DeleteOnComplete, suspended, r.finalizerImage(), r.ImagePullPolicy, r.JobDefaults)
 	if err := controllerutil.SetControllerReference(bj, k8sJob, r.Scheme); err != nil {
 		return 0, false, err
 	}
@@ -792,7 +911,7 @@ func (r *BuildJobReconciler) setStatusPending(ctx context.Context, nn types.Name
 }
 
 // buildK8sJob creates a one-time Job with InitContainers that execute each Step in order
-func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, suspend bool, finalizerImage string, pullPolicy corev1.PullPolicy) *batchv1.Job {
+func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, suspend bool, finalizerImage string, pullPolicy corev1.PullPolicy, defaults JobDefaults) *batchv1.Job {
 	sharedVolName := "shared"
 	sharedMount := corev1.VolumeMount{Name: sharedVolName, MountPath: "/shared"}
 
@@ -830,9 +949,10 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 			// ran in / here and in /shared under Docker, and with an image
 			// declaring WORKDIR /app it would run in /app. That silently breaks
 			// the promise that the same job runs unmodified on either executor.
-			WorkingDir:   sharedMount.MountPath,
-			Env:          envFromMeta(env),
-			VolumeMounts: []corev1.VolumeMount{sharedMount},
+			WorkingDir:      sharedMount.MountPath,
+			Env:             envFromMeta(env),
+			VolumeMounts:    []corev1.VolumeMount{sharedMount},
+			SecurityContext: hardenedContainerContext(),
 		}
 
 		if hasScript {
@@ -853,14 +973,19 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 			}
 		}
 
-		// Set resource limits if specified
-		if s.CPULimit != nil || s.MemoryLimit != nil {
+		// Set resource limits: the step's own, else the operator default, else
+		// the operator maximum, so the maximum holds even with defaults disabled.
+		cpuLimit := effectiveLimit(s.CPULimit, s.CPURequest, defaults.CPULimit, defaults.MaxCPULimit)
+		memLimit := effectiveLimit(s.MemoryLimit, s.MemoryRequest, defaults.MemoryLimit, defaults.MaxMemoryLimit)
+		cpuLimit = clampQuantity(cpuLimit, defaults.MaxCPULimit, "cpu limit", bj.Name, s.ID)
+		memLimit = clampQuantity(memLimit, defaults.MaxMemoryLimit, "memory limit", bj.Name, s.ID)
+		if cpuLimit != nil || memLimit != nil {
 			c.Resources.Limits = corev1.ResourceList{}
-			if s.CPULimit != nil {
-				c.Resources.Limits[corev1.ResourceCPU] = *s.CPULimit
+			if cpuLimit != nil {
+				c.Resources.Limits[corev1.ResourceCPU] = *cpuLimit
 			}
-			if s.MemoryLimit != nil {
-				c.Resources.Limits[corev1.ResourceMemory] = *s.MemoryLimit
+			if memLimit != nil {
+				c.Resources.Limits[corev1.ResourceMemory] = *memLimit
 			}
 		}
 
@@ -868,10 +993,10 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		if s.CPURequest != nil || s.MemoryRequest != nil {
 			c.Resources.Requests = corev1.ResourceList{}
 			if s.CPURequest != nil {
-				c.Resources.Requests[corev1.ResourceCPU] = *s.CPURequest
+				c.Resources.Requests[corev1.ResourceCPU] = *clampQuantity(s.CPURequest, defaults.MaxCPULimit, "cpu request", bj.Name, s.ID)
 			}
 			if s.MemoryRequest != nil {
-				c.Resources.Requests[corev1.ResourceMemory] = *s.MemoryRequest
+				c.Resources.Requests[corev1.ResourceMemory] = *clampQuantity(s.MemoryRequest, defaults.MaxMemoryLimit, "memory request", bj.Name, s.ID)
 			}
 		}
 
@@ -908,16 +1033,29 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{"sh", "-c", "echo build finished"},
 		VolumeMounts:    []corev1.VolumeMount{sharedMount},
+		SecurityContext: hardenedContainerContext(),
+		Resources:       helperResources(),
 	}
 
 	gracePeriod := int64(podTerminationGracePeriodSeconds)
+	noToken := false
+	noLinks := false
 	podSpec := corev1.PodSpec{
+		// Steps run untrusted code and never talk to the Kubernetes API.
+		AutomountServiceAccountToken: &noToken,
+		// Skip the env vars Kubernetes injects for every service in the namespace.
+		EnableServiceLinks: &noLinks,
+		// Root and most default capabilities stay allowed on purpose: arbitrary
+		// step images often need them (package installs).
+		SecurityContext: &corev1.PodSecurityContext{
+			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
 		InitContainers: initCtrs,
 		Containers:     []corev1.Container{dummy},
 		Volumes: []corev1.Volume{{
 			Name: sharedVolName,
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: defaults.SharedVolumeSizeLimit},
 			},
 		}},
 		RestartPolicy: corev1.RestartPolicyNever,
@@ -956,8 +1094,9 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 			BackoffLimit:            &backoff,
 			// Whole-job timeout: Kubernetes fails the Job (reason DeadlineExceeded)
 			// and deletes its pod once this elapses, covering time spent in init
-			// containers (the build steps). nil when no timeout is configured.
-			ActiveDeadlineSeconds: bj.Spec.TimeoutSeconds,
+			// containers (the build steps). The operator default and cap apply, so
+			// an unschedulable pod cannot hold a parallelism slot forever.
+			ActiveDeadlineSeconds: defaults.effectiveTimeout(bj.Spec.TimeoutSeconds),
 			Template: corev1.PodTemplateSpec{
 				// The operator's pod informer is filtered on LabelManagedBy and its
 				// pod watch maps LabelBuildJob back to the BuildJob, so the pod

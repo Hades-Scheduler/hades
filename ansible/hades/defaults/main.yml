@@ -6,7 +6,7 @@ hades_api_version: "{{ hades_version }}"
 hades_node_role: "scheduler" # possible options are "scheduler" and "api"
 
 hades_api_user: "hades" # Currently not used
-hades_api_password: ""
+hades_api_password: "" # Required on api nodes: Basic Auth key for POST /build (user "hades")
 
 hades_api_port: 8080
 hades_api_host: "localhost"
@@ -14,7 +14,7 @@ hades_api_certificate_fullchain_path: ""
 hades_api_certificate_key_path: ""
 
 hades_nats_url: "nats://localhost:4222"
-hades_nats_username: ""
+hades_nats_username: "" # Required on api nodes: the NATS server on the api node enforces these credentials
 hades_nats_password: ""
 hades_nats_tls_enabled: false
 

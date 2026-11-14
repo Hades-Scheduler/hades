@@ -163,6 +163,10 @@ func TestText_VariousSecretForms(t *testing.T) {
 		{"curl -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r'", "dBjftJeZ4CVPmB92K27uhbUJU1p1r"},
 		{"echo ZmFrZS1oaWdoLWVudHJvcHktdG9rZW4tMTIzNDU2Nzg5MA > /tmp/x", "ZmFrZS1oaWdoLWVudHJvcHktdG9rZW4tMTIzNDU2Nzg5MA"},
 		{"psql postgres://admin:s3cr3t@db:5432/app", "s3cr3t"},
+		// a quoted value is masked up to its closing quote
+		{"docker login -u ci -p 'alpha beta' registry.example", "beta"},
+		{"mytool --password \"alpha beta\" run", "beta"},
+		{"mysql -p'alpha beta' -e 'select 1'", "beta"},
 	}
 	for _, c := range cases {
 		out := r.Text(c.in)

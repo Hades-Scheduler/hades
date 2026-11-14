@@ -12,7 +12,7 @@ Go workspace (`go.work`, Go 1.27) with five modules:
 
 | Module                              | Binary / role                                                                                                                                                                       |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HadesAPI/`                         | Gin HTTP server. `POST /build` validates a payload, assigns a UUID, publishes to NATS by priority (and now also publishes `hades.jobstatus.Queued`). `GET /ping` health check. Optional Basic Auth via `AUTH_KEY`. Also hosts the optional **dashboard** (`HadesAPI/dashboard/` + embedded SPA in `HadesAPI/web/`).            |
+| `HadesAPI/`                         | Gin HTTP server. `POST /build` validates a payload, assigns a UUID, publishes to NATS by priority (and now also publishes `hades.jobstatus.Queued`). `GET /ping` health check. Basic Auth via `AUTH_KEY` is required (exits at start when empty unless `ALLOW_UNAUTHENTICATED=true`, dev only); `/build` body capped at 1 MiB, duplicate step ids rejected; Swagger (`DEBUG=true`) sits behind the same auth. Also hosts the optional **dashboard** (`HadesAPI/dashboard/` + embedded SPA in `HadesAPI/web/`).            |
 | `HadesScheduler/`                   | NATS consumer. Reads `HADES_EXECUTOR` and dispatches to either the `docker/` or `k8s/` package.                                                                                     |
 | `HadesScheduler/docker/`            | Runs each step as a Docker container; shares state between steps via a per-job named volume `shared-<uuid>`.                                                                        |
 | `HadesScheduler/k8s/`               | Creates a `BuildJob` CR via the dynamic client for the operator to reconcile. |
@@ -26,10 +26,11 @@ Go workspace (`go.work`, Go 1.27) with five modules:
 - **Status subjects:** `hades.jobstatus.{Queued,Running,Succeeded,Failed,Stopped}` (payload = job ID string, optional `X-Hades-Reason` header). `HadesAPI` publishes `Queued` on enqueue; the scheduler/operator publish `Running`/`Succeeded`/`Failed`. Nothing publishes `Stopped` today. `HadesLogManager` and the dashboard subscribe to the whole `hades.jobstatus.*` lifecycle over **core NATS**.
 - **Status stream:** `HADES_JOB_STATUS` is a JetStream stream over `hades.jobstatus.*` that durably captures those same core-NATS publishes. `HadesLogManager` consumes it through the durable `HADES_STATUS_WEBHOOK` consumer to deliver the **job-status webhook** (`status_callback_url`). Publishers are unchanged and core subscribers still receive every event.
 - **Log subjects:** see `shared/buildlogs/buildlog_stream.go`.
+- **Callbacks:** `callback_url` / `status_callback_url` targets on loopback, private, CGNAT, link-local, unspecified, multicast and other special-purpose (RFC 2544, documentation, NAT64, 6to4, Teredo, reserved) addresses are refused at connect time (SSRF guard in `HadesLogManager/http_client.go`); `CALLBACK_ALLOWED_HOSTS` exempts internal receivers and wins over the built-in list and over `CALLBACK_BLOCKED_CIDRS` (extra ranges to refuse for clusters with public-looking pod/service networks). No redirects on the log callback, proxy env ignored, a blocked status webhook is not retried.
 - **Job leases:** the scheduler acks a job only after the executor returns, and the Docker executor blocks for the whole job. `shared/nats/consumer.go` therefore heartbeats `msg.InProgress()` on a ticker while a job runs so the `NATS_ACK_WAIT` (default 1m) timer keeps resetting - job duration must never determine AckWait. `NATS_MAX_DELIVER` (default 3) caps redeliveries; the last delivery is not executed but publishes a terminal `Failed` status and terminates the message.
 - **Job DTO:** `shared/payload/payload.go` (`QueuePayload` with ordered `Step`s). Job-level: `timeout_seconds` (whole-job timeout). Each step has `image`, optional `script`, `metadata` env vars, `cpu_limit` (whole cores), `memory_limit`, and the Docker-only limits `network`, `memory_swap`, `pids_limit`.
   - **Two outbound pushes, do not conflate them:** `callback_url` forwards the aggregated **log array** and only after `stopWatchingJobLogs` drains the JetStream log consumer; `status_callback_url` receives the **job-status webhook** (`{event, job_id, name, status, reason, queued_at, started_at, finished_at, duration_ms, attempt}`) on the terminal status itself, with at-least-once retry. Neither may be repurposed as the other.
-  - **Executor parity:** `timeout_seconds`, env (`metadata`), `cpu_limit`, `memory_limit` are enforced on both executors (Kubernetes: per-container resources + Job `activeDeadlineSeconds`). `network`, `memory_swap`, `pids_limit` are enforced on the **Docker executor only**; the operator accepts them for schema parity but does not apply them (pod containers share a network namespace; no per-container swap/PID field).
+  - **Executor parity:** `timeout_seconds`, env (`metadata`), `cpu_limit`, `memory_limit` are enforced on both executors (Kubernetes: per-container resources + Job `activeDeadlineSeconds`). `network`, `memory_swap`, `pids_limit` are enforced on the **Docker executor only** (`network` must be in `DOCKER_ALLOWED_NETWORKS`, default `none,bridge,default`, else the job fails; `HADES_DEFAULT_JOB_TIMEOUT_SECONDS` / `HADES_MAX_JOB_TIMEOUT_SECONDS` also Docker only); the operator accepts them for schema parity but does not apply them (pod containers share a network namespace; no per-container swap/PID field). The operator has its own defaults for what a job leaves unset (`JOB_DEFAULT_TIMEOUT_SECONDS` 3600, `JOB_MAX_TIMEOUT_SECONDS` 0, `JOB_DEFAULT_CPU_LIMIT` 2, `JOB_DEFAULT_MEMORY_LIMIT` 4Gi, `JOB_MAX_CPU_LIMIT` 16, `JOB_MAX_MEMORY_LIMIT` 32Gi (clamp a step above them), `JOB_SHARED_VOLUME_SIZE_LIMIT` 10Gi; empty or 0 disables each).
 - **CRD:** `BuildJob` in `HadesScheduler/HadesOperator/api/v1/buildjob_types.go`. **Important:** if you change `BuildJobSpec`, run `make -C HadesScheduler/HadesOperator manifests generate` and commit `helm/hades/crds/build.hades.tum.de_buildjobs.yaml` and `zz_generated.deepcopy.go` - the `verify-crd.yml` GitHub workflow will fail otherwise. The `BuildJobSpec` is intentionally duplicated from `shared/payload`; keep them in sync manually.
 
 ## Build / test
@@ -46,7 +47,7 @@ make -C HadesScheduler/HadesOperator manifests generate fmt vet test
 # helm chart
 helm dependency build ./helm/hades
 helm lint ./helm/hades
-helm template hades ./helm/hades -n hades
+helm template hades ./helm/hades -n hades --set hadesApi.authKeySecret=hades-auth
 
 # regenerate OpenAPI specs after changing a handler annotation or a request/response DTO
 make docs-api
@@ -66,7 +67,7 @@ The top-level `Makefile` wraps the common workflows (`make help` lists every tar
 
 - **CLI mode:** `make run` runs `HadesAPI`, `HadesScheduler`, and `HadesLogManager` via `go run` and auto-starts NATS in Docker.
 - **Docker mode:** `make docker-run` brings up `hadesAPI` (8081→8080), `hadesScheduler` (docker executor), and `nats` via `compose.yml`. API requests: see `bruno/api/*.bru`.
-- **K8s mode:** `helm upgrade --install hades ./helm/hades -n hades --create-namespace`. The chart deploys API, scheduler, operator, log manager, and embedded NATS JetStream.
+- **K8s mode:** `helm upgrade --install hades ./helm/hades -n hades --create-namespace --set hadesApi.authKeySecret=hades-auth` (create that Secret with key `AUTH_KEY` first; `--set hadesApi.allowUnauthenticated=true` is for throwaway installs only). The chart deploys API, scheduler, operator, log manager, and embedded NATS JetStream.
 
 ## Conventions
 
@@ -80,7 +81,10 @@ The top-level `Makefile` wraps the common workflows (`make help` lists every tar
 - Don't bypass the operator path by writing a new direct-K8s scheduler; the operator is the strategic direction.
 - Don't add fields to `BuildJobSpec` without regenerating the CRD (CI will block the PR).
 - Don't introduce package-level mutable globals for dependencies - the codebase has been moving away from them (see `setupRouter` taking `JobPublisher` as a parameter).
-- `HadesLogManager` is deployed (Helm + image) but ClusterIP-internal and single-replica (in-memory aggregation); don't put it on the ingress or scale it past one replica. The status-webhook dispatcher living there keeps no durable state in memory (its retry schedule is in JetStream), but it still assumes one replica. The same single-replica constraint applies to the API's in-memory dashboard read-model. (It just isn't in the `compose.yml` stack.)
+- `HadesLogManager` is deployed (Helm + image) but ClusterIP-internal and single-replica (in-memory aggregation, bounded by `LOG_MAX_TOTAL_BYTES`: oldest completed jobs lose their logs first); don't put it on the ingress or scale it past one replica. The status-webhook dispatcher living there keeps no durable state in memory (its retry schedule is in JetStream), but it still assumes one replica. The same single-replica constraint applies to the API's in-memory dashboard read-model. (It just isn't in the `compose.yml` stack.)
+- NATS itself still has no authentication; it must not be published beyond loopback (compose binds it to `127.0.0.1`, the deploy stack does not publish it). Never list the NATS network in `DOCKER_ALLOWED_NETWORKS`.
+- Don't re-open callbacks to internal addresses or add a redirect-following/proxy-aware callback client; use `CALLBACK_ALLOWED_HOSTS`.
+- Job pods must keep no service account token, `RuntimeDefault` seccomp, `allowPrivilegeEscalation: false`, `enableServiceLinks: false` and dropped `NET_RAW`/`MKNOD` capabilities (not `ALL`: grading images install packages as root); the operator role gets no secrets/configmaps access.
 - The dashboard treats all job/step `Metadata` and step `script` bodies as potentially secret: redact via `shared/redact` before returning any payload; never add an endpoint that returns raw metadata or an unscrubbed script. Job logs are proxied verbatim (a known, documented gap).
 
 

@@ -1,0 +1,93 @@
+{{- if .Values.networkPolicy.enabled }}
+# Job pods run untrusted step code: inside the cluster they reach DNS only, so
+# neither this release nor other namespaces (another Hades install, for one)
+# are exposed to them. The outside stays reachable. DNS goes to the cluster DNS
+# pods only, so a stray listener on port 53 elsewhere is not exempted.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hades-job-pods
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      hades.tum.de/managed-by: hades-operator
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.jobPods.dns.namespaceLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.jobPods.dns.podLabels | nindent 14 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- with .Values.networkPolicy.jobPods.ingressNamespaces }}
+    # Sites published through the cluster's own ingress controller resolve to
+    # controller pods, which the pod network block below would cut off.
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: {{ toJson . }}
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            {{- with .Values.networkPolicy.jobPods.blockedCIDRs }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+---
+# Only the Hades components (and NATS itself, for clustering) reach NATS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hades-nats
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- if .Values.networkPolicy.nats.podLabels }}
+      {{- toYaml .Values.networkPolicy.nats.podLabels | nindent 6 }}
+      {{- else }}
+      app.kubernetes.io/name: nats
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- end }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - hades-api-selector
+                  - hades-scheduler-selector
+                  - hades-operator-selector
+                  - hades-log-manager-selector
+      ports:
+        - protocol: TCP
+          port: {{ .Values.nats.port }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- if .Values.networkPolicy.nats.podLabels }}
+              {{- toYaml .Values.networkPolicy.nats.podLabels | nindent 14 }}
+              {{- else }}
+              app.kubernetes.io/name: nats
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              {{- end }}
+{{- end }}

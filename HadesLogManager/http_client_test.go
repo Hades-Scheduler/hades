@@ -34,6 +34,11 @@ func TestCallbackControlBlocksInternalAddresses(t *testing.T) {
 		"127.0.0.1:80", "[::1]:80", "10.1.2.3:80", "172.16.0.1:80", "192.168.1.1:80",
 		"[fc00::1]:80", "169.254.169.254:80", "[fe80::1]:80", "0.0.0.0:80",
 		"224.0.0.1:80", "[::ffff:127.0.0.1]:80", "100.100.100.200:80",
+		"0.1.2.3:80", "192.0.0.8:80", "192.0.2.1:80", "192.88.99.1:80",
+		"198.18.0.5:80", "198.19.238.201:8081", "[::ffff:198.19.0.1]:80", "198.51.100.1:80",
+		"203.0.113.1:80", "240.0.0.1:80", "255.255.255.255:80",
+		"[64:ff9b::a9fe:a9fe]:80", "[64:ff9b:1::1]:80", "[100::1]:80",
+		"[2001:db8::1]:80", "[2002:a9fe:a9fe::1]:80", "[2001::1]:80",
 	} {
 		assert.ErrorIs(t, allow.control("tcp", addr, nil), errBlockedTarget, addr)
 	}
@@ -52,6 +57,24 @@ func TestCallbackAllowlistExemptsListedTargets(t *testing.T) {
 	assert.ErrorIs(t, allow.control("tcp", "169.254.169.254:80", nil), errBlockedTarget)
 	assert.True(t, allow.hosts["artemis"])
 	assert.True(t, allow.allowsIP(netip.MustParseAddr("10.0.0.1")))
+}
+
+func TestCallbackBlockedCIDRs(t *testing.T) {
+	allow, err := parseCallbackAllowlist(nil)
+	require.NoError(t, err)
+	require.NoError(t, allow.blockCIDRs([]string{" 93.184.216.0/24 ", ""}))
+	assert.ErrorIs(t, allow.control("tcp", "93.184.216.34:443", nil), errBlockedTarget)
+	assert.NoError(t, allow.control("tcp", "8.8.8.8:443", nil))
+
+	// an allowlist entry wins over a blocked CIDR
+	allow, err = parseCallbackAllowlist([]string{"93.184.216.34"})
+	require.NoError(t, err)
+	require.NoError(t, allow.blockCIDRs([]string{"93.184.216.0/24"}))
+	assert.NoError(t, allow.control("tcp", "93.184.216.34:443", nil))
+	assert.ErrorIs(t, allow.control("tcp", "93.184.216.35:443", nil), errBlockedTarget)
+
+	assert.Error(t, allow.blockCIDRs([]string{"not-a-cidr"}))
+	assert.Error(t, allow.blockCIDRs([]string{"10.0.0.1"}))
 }
 
 func TestParseCallbackAllowlistRejectsBadCIDR(t *testing.T) {

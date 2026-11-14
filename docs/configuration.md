@@ -158,6 +158,7 @@ Deployed by the Helm chart (`hades-log-manager`); also run locally via `make run
 | `METRICS_PORT` | `8082` | Port the Prometheus `/metrics` endpoint listens on (see [Metrics](#metrics-all-components)). | `HadesLogManager/main.go` (`HadesLogManagerConfig`) |
 | `LOG_BATCH_SIZE` | `100` | Log entries buffered before a flush. | `HadesLogManager/processor.go` (`AggregatorConfig`) |
 | `LOG_RETENTION` | `1h` | How long completed-job logs are kept in memory (Go duration). | `HadesLogManager/processor.go` |
+| `LOG_MAX_TOTAL_BYTES` | `134217728` | Total log message bytes kept in memory across all jobs; oldest completed jobs are evicted first, `0` disables. | `HadesLogManager/processor.go` |
 | `MAX_JOB_LOGS` | `1000` | Max log entries retained per job. | `HadesLogManager/processor.go` |
 | `LOG_WATCHER_MAX_LIFETIME` | `6h` | Longest a job's log watcher lives without seeing a terminal status, for jobs without `timeout_seconds` (jobs with one use it plus 10m). On expiry the watcher just stops, so a missed status event cannot leak it; the terminal status then replays the full log from JetStream before forwarding it. | `HadesLogManager/log_subscriber.go` |
 | `STATUS_WEBHOOK_ENABLED` | `true` | Deliver the job-status webhook. Inert for jobs without a `status_callback_url`. | `HadesLogManager/status_webhook.go` (`StatusWebhookConfig`) |
@@ -169,8 +170,9 @@ Deployed by the Helm chart (`hades-log-manager`); also run locally via `make run
 | `STATUS_WEBHOOK_MAX_PENDING` | `1000` | Status events awaiting acknowledgement (in flight or backing off). | `HadesLogManager/status_webhook.go` |
 
 | `CALLBACK_ALLOWED_HOSTS` | | Comma-separated host names, IPs or CIDRs exempt from the callback address block (internal receivers such as Artemis in the same cluster or compose network). A host name entry must equal the host in the callback URL and trusts whatever it resolves to. | `HadesLogManager/http_client.go` |
+| `CALLBACK_BLOCKED_CIDRS` | | Comma-separated CIDRs to refuse on top of the built-in list. Use it when the cluster's pod or service network uses public-looking addresses, which the built-in list cannot know. An entry in `CALLBACK_ALLOWED_HOSTS` still wins. | `HadesLogManager/http_client.go` |
 
-Both outbound pushes are configured per job, not globally. Callbacks to loopback, private (RFC 1918, `fc00::/7`), CGNAT (`100.64.0.0/10`), link-local (including `169.254.169.254`), unspecified and multicast addresses are refused at connect time unless allowed by `CALLBACK_ALLOWED_HOSTS`. The log callback does not follow redirects, and HTTP proxy environment variables are ignored. A blocked status webhook is logged as an error and not retried.
+Both outbound pushes are configured per job, not globally. Callbacks to loopback, private (RFC 1918, `fc00::/7`), CGNAT (`100.64.0.0/10`), link-local (including `169.254.169.254`), unspecified, multicast and other special-purpose addresses (such as `198.18.0.0/15`) are refused at connect time unless allowed by `CALLBACK_ALLOWED_HOSTS`. The log callback does not follow redirects, and HTTP proxy environment variables are ignored. A blocked status webhook is logged as an error and not retried.
 
 - `callback_url` - an absolute `http`/`https` URL with a host. The Log Manager forwards that job's aggregated **logs** there once the log stream has drained. If omitted, the job's logs are not forwarded.
 - `status_callback_url` - an absolute `http`/`https` URL with a host. Receives the **job-status webhook** on the terminal status, independently of log forwarding. See [`HadesLogManager/Readme.md`](../HadesLogManager/Readme.md#job-status-webhook).

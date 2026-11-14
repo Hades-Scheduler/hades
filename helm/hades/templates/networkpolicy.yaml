@@ -1,6 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
-# Job pods run untrusted step code: no connections into the release namespace.
-# Other namespaces (DNS) and the outside stay reachable.
+# Job pods run untrusted step code: inside the cluster they reach DNS only, so
+# neither this release nor other namespaces (another Hades install, for one)
+# are exposed to them. The outside stays reachable.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -14,11 +15,12 @@ spec:
     - Egress
   egress:
     - to:
-        - namespaceSelector:
-            matchExpressions:
-              - key: kubernetes.io/metadata.name
-                operator: NotIn
-                values: [{{ .Release.Namespace | quote }}]
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0

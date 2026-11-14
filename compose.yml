@@ -71,6 +71,8 @@ services:
       # Internal callback receivers (host names, IPs, CIDRs) the log manager may
       # POST to; empty = public addresses only.
       - CALLBACK_ALLOWED_HOSTS=${CALLBACK_ALLOWED_HOSTS:-}
+      # Extra CIDRs to refuse, for networks that use public-looking addresses.
+      - CALLBACK_BLOCKED_CIDRS=${CALLBACK_BLOCKED_CIDRS:-}
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
 
   nats:

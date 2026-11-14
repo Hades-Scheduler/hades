@@ -215,11 +215,21 @@ hadesLogManager:
     requests:
       cpu: "200m"
       memory: "256Mi"
+  # -- Total bytes of job log messages the log manager keeps in memory across all
+  # jobs. When it is reached, the logs of the oldest completed jobs are evicted
+  # (their status stays). Heap use is a few times this value, so it must stay well
+  # below the memory limit. "0" disables the bound.
+  logMaxTotalBytes: "134217728"
   # -- Comma-separated host names, IPs or CIDRs that `callback_url` and
   # `status_callback_url` may target although they are loopback, private or
   # link-local, e.g. the in-cluster Artemis service
   # (`artemis.artemis.svc.cluster.local`). Empty = public addresses only.
   callbackAllowedHosts: ""
+  # -- Comma-separated CIDRs that `callback_url` and `status_callback_url` must
+  # not target, on top of the built-in list. Use it when the cluster's pod or
+  # service network uses public-looking addresses. An entry in
+  # `callbackAllowedHosts` still wins. Empty = built-in list only.
+  callbackBlockedCIDRs: ""
   # Where aggregated job logs are forwarded is configured per job via the
   # "callback_url" field on the build request, not globally on the log manager.
   statusWebhook:
@@ -365,9 +375,10 @@ networkPolicy:
   # (`kubectl get pods -n <ns> --show-labels`), then enable.
   enabled: false
   jobPods:
-    # -- CIDRs job pods may not reach, on top of every pod in the release
-    # namespace. Set this to the cluster pod CIDR on CNIs that match pod IPs
-    # against ipBlock rules, otherwise the "outside" rule can still reach pods.
+    # -- CIDRs job pods may not reach. Inside the cluster job pods are allowed
+    # DNS only; set this to the cluster pod and service CIDRs on CNIs that match
+    # pod IPs against ipBlock rules (Calico), otherwise the "outside" rule can
+    # still reach pods.
     blockedCIDRs: []
   nats:
     # -- Labels of the NATS pods. Defaults match the bundled nats chart

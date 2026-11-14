@@ -379,6 +379,25 @@ func (suite *APISuite) TestDuplicateStepIDs() {
 	assert.Contains(suite.T(), w.Body.String(), "Duplicate step id 1")
 }
 
+// /build is a JSON API: a form, XML or TOML body must not be decoded into a job.
+func (suite *APISuite) TestNonJSONBodyRejected() {
+	cases := map[string]string{
+		"application/x-www-form-urlencoded": "name=x&Name=x",
+		"application/xml":                   "<RESTPayload><Name>x</Name></RESTPayload>",
+		"application/toml":                  `Name = "x"`,
+	}
+	for contentType, body := range cases {
+		suite.Run(contentType, func() {
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequest("POST", "/build", strings.NewReader(body))
+			req.Header.Set("Content-Type", contentType)
+			suite.router.ServeHTTP(w, req)
+			assert.Equal(suite.T(), 400, w.Code)
+			assert.Contains(suite.T(), w.Body.String(), "Invalid JSON body")
+		})
+	}
+}
+
 func (suite *APISuite) TestInvalidStepsRejected() {
 	cases := []struct {
 		name string

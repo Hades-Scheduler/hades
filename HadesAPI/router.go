@@ -176,7 +176,7 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 	var p payload.RESTPayload
 	p.Priority = 3
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBuildBodyBytes)
-	if err := c.ShouldBind(&p); err != nil {
+	if err := c.ShouldBindJSON(&p); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			buildRequestsTotal.WithLabelValues("rejected").Inc()

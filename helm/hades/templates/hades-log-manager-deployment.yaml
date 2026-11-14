@@ -54,8 +54,12 @@ spec:
               value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
             - name: HADESLOGMANAGER_API_PORT
               value: {{ .Values.hadesLogManager.service.targetPort | quote }}
+            - name: LOG_MAX_TOTAL_BYTES
+              value: {{ .Values.hadesLogManager.logMaxTotalBytes | quote }}
             - name: CALLBACK_ALLOWED_HOSTS
               value: {{ .Values.hadesLogManager.callbackAllowedHosts | quote }}
+            - name: CALLBACK_BLOCKED_CIDRS
+              value: {{ .Values.hadesLogManager.callbackBlockedCIDRs | quote }}
             - name: STATUS_WEBHOOK_ENABLED
               value: {{ .Values.hadesLogManager.statusWebhook.enabled | quote }}
             - name: STATUS_WEBHOOK_MAX_ATTEMPTS

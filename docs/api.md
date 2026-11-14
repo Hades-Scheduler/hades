@@ -58,7 +58,7 @@ curl -X POST -H "Content-Type: application/json" \
 | Status | Body | Meaning |
 | ------ | ---- | ------- |
 | `200 OK` | `{ "message": "Successfully enqueued job", "job_id": "<uuid>" }` | Job accepted and queued. |
-| `400 Bad Request` | plain-text message naming the offending field | Invalid JSON or failed validation (e.g. missing `name`, no steps, a step id outside 1..2147483647, a step without `image`, unparseable `memory_limit`, duplicate step ids). |
+| `400 Bad Request` | plain-text message naming the offending field | Invalid JSON or failed validation (e.g. missing `name`, no steps, a step id outside 1..2147483647, a step without `image`, unparseable `memory_limit`, duplicate step ids, more than 100 steps, `cpu_limit` above 1024, `memory_limit` or `memory_swap` above 1T). |
 | `413 Request Entity Too Large` | | The body exceeds 1 MiB. |
 | `500 Internal Server Error` | `Failed to enqueue job` | NATS publish failed. |
 

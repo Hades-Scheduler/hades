@@ -185,6 +185,13 @@ func TestJobDefaults(t *testing.T) {
 	if err != nil || d.CPULimit != nil || d.MemoryLimit != nil || d.SharedVolumeSizeLimit != nil {
 		t.Errorf("empty config must disable the defaults, got %+v, %v", d, err)
 	}
+	d, err = (&OperatorConfig{JobMaxCPULimit: "16", JobMaxMemoryLimit: "32Gi"}).jobDefaults()
+	if err != nil || d.MaxCPULimit == nil || d.MaxMemoryLimit == nil {
+		t.Fatalf("jobDefaults() max = %+v, %v", d, err)
+	}
+	if _, err := (&OperatorConfig{JobMaxMemoryLimit: "lots"}).jobDefaults(); err == nil {
+		t.Error("an invalid max quantity must fail")
+	}
 	if _, err := (&OperatorConfig{JobDefaultMemoryLimit: "lots"}).jobDefaults(); err == nil {
 		t.Error("an invalid quantity must fail")
 	}

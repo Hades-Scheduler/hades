@@ -62,6 +62,16 @@ func securityHeaders() gin.HandlerFunc {
 // maxBuildBodyBytes caps the /build request body (1 MiB).
 const maxBuildBodyBytes = 1 << 20
 
+// Sanity bounds on what one job may ask for. The step count keeps the
+// Kubernetes Job within what the API server accepts, the resource bounds keep
+// absurd values out of both executors (the Docker one multiplies cores into
+// nano CPUs).
+const (
+	maxSteps       = 100
+	maxCPULimit    = 1024
+	maxMemoryBytes = 1 << 40
+)
+
 func setupRouter(authKey string, producer hades.JobPublisher, statusPublisher buildstatus.StatusPublisher, dash *dashboard.Server) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.ErrorLogger())
@@ -199,6 +209,12 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 		return
 	}
 
+	if len(p.QueuePayload.Steps) > maxSteps {
+		buildRequestsTotal.WithLabelValues("rejected").Inc()
+		c.String(http.StatusBadRequest, fmt.Sprintf("Too many steps: a job can have at most %d steps", maxSteps))
+		return
+	}
+
 	seenStepIDs := make(map[int]bool, len(p.QueuePayload.Steps))
 	for _, step := range p.QueuePayload.Steps {
 		if step.ID < 1 || step.ID > math.MaxInt32 {
@@ -218,6 +234,12 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 		}
 		seenStepIDs[step.ID] = true
 
+		if step.CPULimit > maxCPULimit {
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusBadRequest, fmt.Sprintf("cpu_limit must not exceed %d cores", maxCPULimit))
+			return
+		}
+
 		var memLimitBytes int64
 		if step.MemoryLimit != "" {
 			parsed, err := utils.ParseMemoryLimit(step.MemoryLimit)
@@ -225,6 +247,11 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 				slog.Error("Failed to parse RAM limit", "error", err)
 				buildRequestsTotal.WithLabelValues("rejected").Inc()
 				c.String(http.StatusBadRequest, "Failed to parse RAM limit")
+				return
+			}
+			if parsed > maxMemoryBytes {
+				buildRequestsTotal.WithLabelValues("rejected").Inc()
+				c.String(http.StatusBadRequest, "memory_limit must not exceed 1T (1024G)")
 				return
 			}
 			memLimitBytes = parsed
@@ -235,6 +262,11 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 			if err != nil {
 				slog.Error("Failed to parse memory_swap limit", "error", err)
 				c.String(http.StatusBadRequest, "Failed to parse memory_swap limit")
+				return
+			}
+			if swapBytes > maxMemoryBytes {
+				buildRequestsTotal.WithLabelValues("rejected").Inc()
+				c.String(http.StatusBadRequest, "memory_swap must not exceed 1T (1024G)")
 				return
 			}
 			// Docker requires memory_swap (total memory+swap) to be set together

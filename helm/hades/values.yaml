@@ -178,6 +178,14 @@ hadesOperator:
   # `memory_limit`. Empty disables the default. An invalid value fails operator
   # startup.
   jobDefaultMemoryLimit: "4Gi"
+  # -- Largest CPU limit and request (Kubernetes quantity) a step may have. A
+  # larger value is clamped to it, the defaults included. Empty disables the
+  # cap. An invalid value fails operator startup.
+  jobMaxCPULimit: "16"
+  # -- Largest memory limit and request (Kubernetes quantity) a step may have. A
+  # larger value is clamped to it, the defaults included. Empty disables the
+  # cap. An invalid value fails operator startup.
+  jobMaxMemoryLimit: "32Gi"
   # -- Size limit of the `emptyDir` shared between the steps of a job (mounted at
   # `/shared`). Without it a job can fill the node's disk. Empty disables the
   # limit. An invalid value fails operator startup.

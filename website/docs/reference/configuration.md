@@ -114,6 +114,8 @@ Only deployed when the scheduler runs in `operator` mode.
 | `JOB_MAX_TIMEOUT_SECONDS` | `0` | Upper bound for the job timeout; a larger or missing job timeout is clamped to it. `0` means no cap. |
 | `JOB_DEFAULT_CPU_LIMIT` | `2` | CPU limit for each step that sets no `cpu_limit` (Kubernetes quantity; requests default to limits). Empty disables it. An invalid value fails operator startup. |
 | `JOB_DEFAULT_MEMORY_LIMIT` | `4Gi` | Memory limit for each step that sets no `memory_limit` (Kubernetes quantity). Empty disables it. An invalid value fails operator startup. |
+| `JOB_MAX_CPU_LIMIT` | `16` | Largest CPU limit and request a step may have (Kubernetes quantity). A larger value, the default included, is clamped to it. Empty disables the cap. An invalid value fails operator startup. |
+| `JOB_MAX_MEMORY_LIMIT` | `32Gi` | Largest memory limit and request a step may have (Kubernetes quantity). A larger value, the default included, is clamped to it. Empty disables the cap. An invalid value fails operator startup. |
 | `JOB_SHARED_VOLUME_SIZE_LIMIT` | `10Gi` | `sizeLimit` of the `emptyDir` shared between the steps of a job (`/shared`). Empty disables it. An invalid value fails operator startup. |
 | `DEV_MODE` | `false` | Enable the controller-runtime development logger. |
 

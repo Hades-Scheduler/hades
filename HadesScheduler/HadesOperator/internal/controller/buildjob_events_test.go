@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,11 +12,16 @@ import (
 	"github.com/hades-scheduler/hades/hadesScheduler/log"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestBuildK8sJob_PodTemplateLabelsAndGracePeriod(t *testing.T) {
@@ -503,5 +509,75 @@ func TestCreateJob_AlreadyExistsReportsExistingSuspend(t *testing.T) {
 	}
 	if suspended {
 		t.Fatal("createJob reported suspended for an existing running Job")
+	}
+}
+
+// A Job the API server will never accept ends the BuildJob as Failed instead of
+// being retried with backoff forever; a transient error is still returned.
+func TestReconcile_JobCreateErrors(t *testing.T) {
+	gr := schema.GroupResource{Group: "batch", Resource: "jobs"}
+	long := strings.Repeat("x", 5000)
+	cases := []struct {
+		name         string
+		err          error
+		deleteOnDone bool
+		wantFailed   bool
+	}{
+		{"invalid", apierrors.NewInvalid(schema.GroupKind{Group: "batch", Kind: "Job"}, "buildjob-job-1", field.ErrorList{field.TooMany(field.NewPath("spec"), 5000, 250)}), false, true},
+		{"invalid with a huge message", apierrors.NewBadRequest(long), false, true},
+		{"too large", apierrors.NewRequestEntityTooLargeError("too big"), false, true},
+		{"failed CR is deleted on complete", apierrors.NewBadRequest("no"), true, true},
+		{"timeout is retried", apierrors.NewTimeoutError("slow", 1), false, false},
+		{"unavailable is retried", apierrors.NewServiceUnavailable("down"), false, false},
+		{"conflict is retried", apierrors.NewConflict(gr, "buildjob-job-1", errors.New("c")), false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			bj := &buildv1.BuildJob{
+				ObjectMeta: metav1.ObjectMeta{Name: "job-1", Namespace: "ns"},
+				Spec:       buildv1.BuildJobSpec{Steps: []buildv1.BuildStep{{ID: 1, Image: "alpine"}}},
+			}
+			r := newAdmissionTestReconciler(t, 1)
+			r.Client = interceptor.NewClient(
+				fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(bj).WithStatusSubresource(bj).Build(),
+				interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*batchv1.Job); ok {
+						return tc.err
+					}
+					return c.Create(ctx, obj, opts...)
+				}})
+			// The nil NATS connection makes the publish fail, which is only logged.
+			r.Publisher = &log.NATSPublisher{}
+			r.DeleteOnComplete = tc.deleteOnDone
+
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(bj)})
+			var got buildv1.BuildJob
+			getErr := r.Get(ctx, client.ObjectKeyFromObject(bj), &got)
+			if !tc.wantFailed {
+				if err == nil {
+					t.Fatal("Reconcile() = nil, want the transient error returned for a retry")
+				}
+				if getErr != nil || got.Status.Phase != "" {
+					t.Errorf("BuildJob phase = %q (err %v), want untouched", got.Status.Phase, getErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Reconcile() = %v, want nil", err)
+			}
+			if tc.deleteOnDone {
+				if !apierrors.IsNotFound(getErr) {
+					t.Errorf("BuildJob still exists (err %v), want it deleted", getErr)
+				}
+				return
+			}
+			if getErr != nil || got.Status.Phase != "Failed" {
+				t.Fatalf("phase = %q (err %v), want Failed", got.Status.Phase, getErr)
+			}
+			if !strings.HasPrefix(got.Status.Message, "cannot create Job: ") || len(got.Status.Message) > maxCreateMessage+40 {
+				t.Errorf("message = %q (%d bytes), want a short cannot-create reason", got.Status.Message, len(got.Status.Message))
+			}
+		})
 	}
 }

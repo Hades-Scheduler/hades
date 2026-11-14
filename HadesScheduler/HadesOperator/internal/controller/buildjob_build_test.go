@@ -467,3 +467,47 @@ func TestBuildK8sJob_DropsCapabilitiesAndServiceLinks(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildK8sJob_MaxLimitsClamp(t *testing.T) {
+	q := resource.MustParse
+	maxCPU, maxMem := q("16"), q("32Gi")
+	big, bigMem := q("100"), q("1Ti")
+	first := func(step buildv1.BuildStep, d JobDefaults) corev1.Container {
+		return buildK8sJob(defaultsTestJob(nil, step), "job-1", true, false, DefaultFinalizerImage, "", d).Spec.Template.Spec.InitContainers[0]
+	}
+
+	t.Run("step limits above the max are clamped, requests follow", func(t *testing.T) {
+		c := first(buildv1.BuildStep{CPULimit: &big, MemoryLimit: &bigMem}, JobDefaults{MaxCPULimit: &maxCPU, MaxMemoryLimit: &maxMem})
+		if !c.Resources.Limits.Cpu().Equal(maxCPU) || !c.Resources.Limits.Memory().Equal(maxMem) {
+			t.Errorf("limits = %v, want 16 and 32Gi", c.Resources.Limits)
+		}
+		if !c.Resources.Requests.Cpu().Equal(maxCPU) || !c.Resources.Requests.Memory().Equal(maxMem) {
+			t.Errorf("requests = %v, want 16 and 32Gi", c.Resources.Requests)
+		}
+	})
+	t.Run("explicit requests above the max are clamped", func(t *testing.T) {
+		c := first(buildv1.BuildStep{CPURequest: &big, MemoryRequest: &bigMem}, JobDefaults{MaxCPULimit: &maxCPU, MaxMemoryLimit: &maxMem})
+		if !c.Resources.Requests.Cpu().Equal(maxCPU) || !c.Resources.Requests.Memory().Equal(maxMem) {
+			t.Errorf("requests = %v, want 16 and 32Gi", c.Resources.Requests)
+		}
+	})
+	t.Run("values below the max are untouched", func(t *testing.T) {
+		small := q("2")
+		c := first(buildv1.BuildStep{CPULimit: &small}, JobDefaults{MaxCPULimit: &maxCPU})
+		if !c.Resources.Limits.Cpu().Equal(small) {
+			t.Errorf("cpu limit = %v, want 2", c.Resources.Limits.Cpu())
+		}
+	})
+	t.Run("defaults above the max are clamped too", func(t *testing.T) {
+		c := first(buildv1.BuildStep{}, JobDefaults{CPULimit: &big, MemoryLimit: &bigMem, MaxCPULimit: &maxCPU, MaxMemoryLimit: &maxMem})
+		if !c.Resources.Limits.Cpu().Equal(maxCPU) || !c.Resources.Limits.Memory().Equal(maxMem) {
+			t.Errorf("limits = %v, want 16 and 32Gi", c.Resources.Limits)
+		}
+	})
+	t.Run("no max leaves the value alone", func(t *testing.T) {
+		c := first(buildv1.BuildStep{CPULimit: &big}, JobDefaults{})
+		if !c.Resources.Limits.Cpu().Equal(big) {
+			t.Errorf("cpu limit = %v, want 100", c.Resources.Limits.Cpu())
+		}
+	})
+}

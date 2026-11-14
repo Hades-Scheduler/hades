@@ -139,8 +139,40 @@ type JobDefaults struct {
 	// did not set. Nil leaves it unlimited.
 	CPULimit    *resource.Quantity
 	MemoryLimit *resource.Quantity
+	// MaxCPULimit and MaxMemoryLimit cap what a step may ask for, limits and
+	// requests alike (also the defaults above). Nil = no cap.
+	MaxCPULimit    *resource.Quantity
+	MaxMemoryLimit *resource.Quantity
 	// SharedVolumeSizeLimit is the sizeLimit of the shared emptyDir. Nil = none.
 	SharedVolumeSizeLimit *resource.Quantity
+}
+
+// clampQuantity returns max when q is above it and says so in the log, so a
+// job cannot ask for more than the cluster operator allows. Nil on either side
+// returns q unchanged.
+func clampQuantity(q, max *resource.Quantity, what, buildJob string, stepID int32) *resource.Quantity {
+	if q == nil || max == nil || q.Cmp(*max) <= 0 {
+		return q
+	}
+	slog.Info("Clamping step resource to the operator maximum", "buildJob", buildJob, "step", stepID, "resource", what, "requested", q.String(), "max", max.String())
+	return max
+}
+
+// maxCreateMessage bounds the API server message kept as the failure reason,
+// which for a huge Job can list thousands of field errors.
+const maxCreateMessage = 300
+
+// jobNeverCreatable reports whether retrying the Job create cannot succeed
+// because the API server rejects the object itself.
+func jobNeverCreatable(err error) bool {
+	return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsRequestEntityTooLargeError(err)
+}
+
+func truncateMessage(s string) string {
+	if len(s) <= maxCreateMessage {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxCreateMessage], "") + "..."
 }
 
 // helperResources keeps the finalizer container (it only echoes a line) small.
@@ -601,7 +633,25 @@ func (r *BuildJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// bj.Spec.Steps), suspended if the limit is reached.
 	active, shouldSuspend, err := r.createJob(ctx, &bj, jobName)
 	if err != nil {
-		return ctrl.Result{}, err
+		if !jobNeverCreatable(err) {
+			return ctrl.Result{}, err
+		}
+		// The API server rejects this Job itself (invalid, too many steps, too
+		// large), so a retry would fail the same way forever. End the BuildJob.
+		slog.Error("Job can never be created; failing BuildJob", "buildJob", bj.Name, "error", err)
+		if _, serr := r.setStatusCompleted(ctx, req.NamespacedName, bj.Name, false, "cannot create Job: "+truncateMessage(err.Error())); serr != nil {
+			if apierrors.IsConflict(serr) {
+				return ctrl.Result{RequeueAfter: conflictRequeueDelay}, nil
+			}
+			return ctrl.Result{}, serr
+		}
+		if r.DeleteOnComplete {
+			policy := metav1.DeletePropagationForeground
+			if derr := r.Delete(ctx, &bj, &client.DeleteOptions{PropagationPolicy: &policy}); derr != nil && !apierrors.IsNotFound(derr) {
+				return ctrl.Result{}, derr
+			}
+		}
+		return ctrl.Result{}, nil
 	}
 
 	// 3.3.1 Initialize container statuses
@@ -915,6 +965,8 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		if memLimit == nil {
 			memLimit = defaults.MemoryLimit
 		}
+		cpuLimit = clampQuantity(cpuLimit, defaults.MaxCPULimit, "cpu limit", bj.Name, s.ID)
+		memLimit = clampQuantity(memLimit, defaults.MaxMemoryLimit, "memory limit", bj.Name, s.ID)
 		if cpuLimit != nil || memLimit != nil {
 			c.Resources.Limits = corev1.ResourceList{}
 			if cpuLimit != nil {
@@ -929,10 +981,10 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		if s.CPURequest != nil || s.MemoryRequest != nil {
 			c.Resources.Requests = corev1.ResourceList{}
 			if s.CPURequest != nil {
-				c.Resources.Requests[corev1.ResourceCPU] = *s.CPURequest
+				c.Resources.Requests[corev1.ResourceCPU] = *clampQuantity(s.CPURequest, defaults.MaxCPULimit, "cpu request", bj.Name, s.ID)
 			}
 			if s.MemoryRequest != nil {
-				c.Resources.Requests[corev1.ResourceMemory] = *s.MemoryRequest
+				c.Resources.Requests[corev1.ResourceMemory] = *clampQuantity(s.MemoryRequest, defaults.MaxMemoryLimit, "memory request", bj.Name, s.ID)
 			}
 		}
 

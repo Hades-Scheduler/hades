@@ -86,6 +86,8 @@ type OperatorConfig struct {
 	JobMaxTimeoutSeconds     int64  `env:"JOB_MAX_TIMEOUT_SECONDS" envDefault:"0"`
 	JobDefaultCPULimit       string `env:"JOB_DEFAULT_CPU_LIMIT" envDefault:"2"`
 	JobDefaultMemoryLimit    string `env:"JOB_DEFAULT_MEMORY_LIMIT" envDefault:"4Gi"`
+	JobMaxCPULimit           string `env:"JOB_MAX_CPU_LIMIT" envDefault:"16"`
+	JobMaxMemoryLimit        string `env:"JOB_MAX_MEMORY_LIMIT" envDefault:"32Gi"`
 	JobSharedVolumeSizeLimit string `env:"JOB_SHARED_VOLUME_SIZE_LIMIT" envDefault:"10Gi"`
 }
 
@@ -108,6 +110,12 @@ func (c *OperatorConfig) jobDefaults() (controller.JobDefaults, error) {
 		return d, err
 	}
 	if d.MemoryLimit, err = parseQuantity("JOB_DEFAULT_MEMORY_LIMIT", c.JobDefaultMemoryLimit); err != nil {
+		return d, err
+	}
+	if d.MaxCPULimit, err = parseQuantity("JOB_MAX_CPU_LIMIT", c.JobMaxCPULimit); err != nil {
+		return d, err
+	}
+	if d.MaxMemoryLimit, err = parseQuantity("JOB_MAX_MEMORY_LIMIT", c.JobMaxMemoryLimit); err != nil {
 		return d, err
 	}
 	d.SharedVolumeSizeLimit, err = parseQuantity("JOB_SHARED_VOLUME_SIZE_LIMIT", c.JobSharedVolumeSizeLimit)

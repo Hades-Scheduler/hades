@@ -392,6 +392,12 @@ func (suite *APISuite) TestInvalidStepsRejected() {
 		{"id zero", `{"name":"x","steps":[{"id":0,"image":"i"}]}`, "Invalid step id 0"},
 		{"id negative", `{"name":"x","steps":[{"id":-1,"image":"i"}]}`, "Invalid step id -1"},
 		{"id too large", `{"name":"x","steps":[{"id":9223372036854775807,"image":"i"}]}`, "Invalid step id 9223372036854775807"},
+		{"too many steps", `{"name":"x","steps":[` + strings.TrimSuffix(strings.Repeat(`{"id":1,"image":"i"},`, maxSteps+1), ",") + `]}`, "at most 100 steps"},
+		{"cpu above max", `{"name":"x","steps":[{"id":1,"image":"i","cpu_limit":1025}]}`, "cpu_limit must not exceed 1024"},
+		{"cpu uint max", `{"name":"x","steps":[{"id":1,"image":"i","cpu_limit":18446744073709551615}]}`, "cpu_limit must not exceed 1024"},
+		{"memory above max", `{"name":"x","steps":[{"id":1,"image":"i","memory_limit":"1025G"}]}`, "memory_limit must not exceed 1T"},
+		{"memory overflow", `{"name":"x","steps":[{"id":1,"image":"i","memory_limit":"999999999999999G"}]}`, "Failed to parse RAM limit"},
+		{"swap above max", `{"name":"x","steps":[{"id":1,"image":"i","memory_limit":"1G","memory_swap":"1025G"}]}`, "memory_swap must not exceed 1T"},
 		{"id just above int32", `{"name":"x","steps":[{"id":2147483648,"image":"i"}]}`, "Invalid step id 2147483648"},
 	}
 	for _, tc := range cases {
@@ -404,6 +410,11 @@ func (suite *APISuite) TestInvalidStepsRejected() {
 			assert.Contains(suite.T(), w.Body.String(), tc.want)
 		})
 	}
+}
+
+func (suite *APISuite) TestLimitsAtTheMaximumAccepted() {
+	w := suite.postStep(payload.Step{ID: 1, Name: "s", Image: "image1", CPULimit: 1024, MemoryLimit: "1024G", MemorySwap: "1024G"}, 0)
+	assert.Equal(suite.T(), 200, w.Code)
 }
 
 func (suite *APISuite) TestMaxInt32StepIDAccepted() {

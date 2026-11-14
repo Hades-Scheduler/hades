@@ -164,6 +164,24 @@ hadesOperator:
   # image is missing. The finalizer container is not affected. Invalid values
   # fail operator startup.
   imagePullPolicy: ""
+  # -- Timeout (seconds) applied to jobs that set no `timeout_seconds`, so a hung
+  # or unschedulable job cannot hold a parallelism slot forever. Empty or 0
+  # disables the default.
+  jobDefaultTimeoutSeconds: "3600"
+  # -- Upper bound (seconds) for the job timeout. A larger or missing job timeout
+  # is clamped to it. Empty or 0 means no cap.
+  jobMaxTimeoutSeconds: "0"
+  # -- CPU limit (Kubernetes quantity) for each step that sets no `cpu_limit`.
+  # Empty disables the default. An invalid value fails operator startup.
+  jobDefaultCPULimit: "2"
+  # -- Memory limit (Kubernetes quantity) for each step that sets no
+  # `memory_limit`. Empty disables the default. An invalid value fails operator
+  # startup.
+  jobDefaultMemoryLimit: "4Gi"
+  # -- Size limit of the `emptyDir` shared between the steps of a job (mounted at
+  # `/shared`). Without it a job can fill the node's disk. Empty disables the
+  # limit. An invalid value fails operator startup.
+  jobSharedVolumeSizeLimit: "10Gi"
 
 hadesLogManager:
   image:

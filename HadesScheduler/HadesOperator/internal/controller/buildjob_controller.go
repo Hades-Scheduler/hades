@@ -30,6 +30,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -116,9 +117,53 @@ const (
 	LabelPriority = hades.MetadataKeyPriority
 )
 
-func noPrivilegeEscalation() *corev1.SecurityContext {
+// hardenedContainerContext is the security context of every job container.
+// NET_RAW (packet spoofing) and MKNOD (device nodes) go away; the other default
+// capabilities stay because step images often install packages as root.
+func hardenedContainerContext() *corev1.SecurityContext {
 	f := false
-	return &corev1.SecurityContext{AllowPrivilegeEscalation: &f}
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: &f,
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"NET_RAW", "MKNOD"}},
+	}
+}
+
+// JobDefaults are operator-wide fallbacks for what a job leaves unset, so a job
+// cannot run unbounded. The zero value disables every default.
+type JobDefaults struct {
+	// TimeoutSeconds is the Job's activeDeadlineSeconds when the BuildJob has none.
+	TimeoutSeconds int64
+	// MaxTimeoutSeconds caps the job timeout (also when the job has none). 0 = no cap.
+	MaxTimeoutSeconds int64
+	// CPULimit and MemoryLimit apply per step container for a resource the step
+	// did not set. Nil leaves it unlimited.
+	CPULimit    *resource.Quantity
+	MemoryLimit *resource.Quantity
+	// SharedVolumeSizeLimit is the sizeLimit of the shared emptyDir. Nil = none.
+	SharedVolumeSizeLimit *resource.Quantity
+}
+
+// helperResources keeps the finalizer container (it only echoes a line) small.
+func helperResources() corev1.ResourceRequirements {
+	l := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("100m"),
+		corev1.ResourceMemory: resource.MustParse("64Mi"),
+	}
+	return corev1.ResourceRequirements{Limits: l, Requests: l.DeepCopy()}
+}
+
+// effectiveTimeout applies the default and the cap to the job's own timeout.
+func (d JobDefaults) effectiveTimeout(job *int64) *int64 {
+	t := job
+	if t == nil && d.TimeoutSeconds > 0 {
+		v := d.TimeoutSeconds
+		t = &v
+	}
+	if d.MaxTimeoutSeconds > 0 && (t == nil || *t > d.MaxTimeoutSeconds) {
+		v := d.MaxTimeoutSeconds
+		t = &v
+	}
+	return t
 }
 
 // ManagedByValue is the value of the LabelManagedBy label applied to Jobs the
@@ -159,6 +204,9 @@ type BuildJobReconciler struct {
 	// FinalizerImage is the image for the pod's main container. Empty falls back
 	// to DefaultFinalizerImage.
 	FinalizerImage string
+
+	// JobDefaults are the timeout, resource and volume fallbacks for jobs.
+	JobDefaults JobDefaults
 
 	// ImagePullPolicy is applied to every step container. Empty leaves it unset,
 	// which keeps Kubernetes' default (Always for :latest or untagged images).
@@ -602,7 +650,7 @@ func (r *BuildJobReconciler) createJob(ctx context.Context, bj *buildv1.BuildJob
 	active = r.admission.activeCount(bj.Namespace, jobs, time.Now())
 	suspended = active >= r.MaxParallelism
 
-	k8sJob := buildK8sJob(bj, jobName, r.DeleteOnComplete, suspended, r.finalizerImage(), r.ImagePullPolicy)
+	k8sJob := buildK8sJob(bj, jobName, r.DeleteOnComplete, suspended, r.finalizerImage(), r.ImagePullPolicy, r.JobDefaults)
 	if err := controllerutil.SetControllerReference(bj, k8sJob, r.Scheme); err != nil {
 		return 0, false, err
 	}
@@ -797,7 +845,7 @@ func (r *BuildJobReconciler) setStatusPending(ctx context.Context, nn types.Name
 }
 
 // buildK8sJob creates a one-time Job with InitContainers that execute each Step in order
-func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, suspend bool, finalizerImage string, pullPolicy corev1.PullPolicy) *batchv1.Job {
+func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, suspend bool, finalizerImage string, pullPolicy corev1.PullPolicy, defaults JobDefaults) *batchv1.Job {
 	sharedVolName := "shared"
 	sharedMount := corev1.VolumeMount{Name: sharedVolName, MountPath: "/shared"}
 
@@ -838,7 +886,7 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 			WorkingDir:      sharedMount.MountPath,
 			Env:             envFromMeta(env),
 			VolumeMounts:    []corev1.VolumeMount{sharedMount},
-			SecurityContext: noPrivilegeEscalation(),
+			SecurityContext: hardenedContainerContext(),
 		}
 
 		if hasScript {
@@ -859,14 +907,21 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 			}
 		}
 
-		// Set resource limits if specified
-		if s.CPULimit != nil || s.MemoryLimit != nil {
+		// Set resource limits: the step's own, else the operator default
+		cpuLimit, memLimit := s.CPULimit, s.MemoryLimit
+		if cpuLimit == nil {
+			cpuLimit = defaults.CPULimit
+		}
+		if memLimit == nil {
+			memLimit = defaults.MemoryLimit
+		}
+		if cpuLimit != nil || memLimit != nil {
 			c.Resources.Limits = corev1.ResourceList{}
-			if s.CPULimit != nil {
-				c.Resources.Limits[corev1.ResourceCPU] = *s.CPULimit
+			if cpuLimit != nil {
+				c.Resources.Limits[corev1.ResourceCPU] = *cpuLimit
 			}
-			if s.MemoryLimit != nil {
-				c.Resources.Limits[corev1.ResourceMemory] = *s.MemoryLimit
+			if memLimit != nil {
+				c.Resources.Limits[corev1.ResourceMemory] = *memLimit
 			}
 		}
 
@@ -914,16 +969,20 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{"sh", "-c", "echo build finished"},
 		VolumeMounts:    []corev1.VolumeMount{sharedMount},
-		SecurityContext: noPrivilegeEscalation(),
+		SecurityContext: hardenedContainerContext(),
+		Resources:       helperResources(),
 	}
 
 	gracePeriod := int64(podTerminationGracePeriodSeconds)
 	noToken := false
+	noLinks := false
 	podSpec := corev1.PodSpec{
 		// Steps run untrusted code and never talk to the Kubernetes API.
 		AutomountServiceAccountToken: &noToken,
-		// Root and default capabilities stay allowed on purpose: arbitrary step
-		// images often need them (package installs).
+		// Skip the env vars Kubernetes injects for every service in the namespace.
+		EnableServiceLinks: &noLinks,
+		// Root and most default capabilities stay allowed on purpose: arbitrary
+		// step images often need them (package installs).
 		SecurityContext: &corev1.PodSecurityContext{
 			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
@@ -932,7 +991,7 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 		Volumes: []corev1.Volume{{
 			Name: sharedVolName,
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: defaults.SharedVolumeSizeLimit},
 			},
 		}},
 		RestartPolicy: corev1.RestartPolicyNever,
@@ -971,8 +1030,9 @@ func buildK8sJob(bj *buildv1.BuildJob, jobName string, deleteOnComplete bool, su
 			BackoffLimit:            &backoff,
 			// Whole-job timeout: Kubernetes fails the Job (reason DeadlineExceeded)
 			// and deletes its pod once this elapses, covering time spent in init
-			// containers (the build steps). nil when no timeout is configured.
-			ActiveDeadlineSeconds: bj.Spec.TimeoutSeconds,
+			// containers (the build steps). The operator default and cap apply, so
+			// an unschedulable pod cannot hold a parallelism slot forever.
+			ActiveDeadlineSeconds: defaults.effectiveTimeout(bj.Spec.TimeoutSeconds),
 			Template: corev1.PodTemplateSpec{
 				// The operator's pod informer is filtered on LabelManagedBy and its
 				// pod watch maps LabelBuildJob back to the BuildJob, so the pod

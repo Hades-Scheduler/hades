@@ -391,6 +391,7 @@ Breaking changes:
 - `/build` bodies are capped at 1 MiB (413 above) and duplicate step ids are rejected with 400.
 - `compose.yml` requires `AUTH_KEY` in `.env` and publishes API, log manager, NATS and Jaeger on `127.0.0.1` only. `docker-compose.deploy.yml` publishes only Traefik on 80/443 (Compose 2.24 or later) and no longer routes the log manager publicly.
 - Kubernetes: job pods no longer mount a service account token and run with the `RuntimeDefault` seccomp profile and `allowPrivilegeEscalation: false`. The operator role has no access to secrets or configmaps. `hadesOperator.DeleteOnComplete` now defaults to `true`. Optional `networkPolicy.enabled` (default `false`) is new.
+- Kubernetes: jobs now get a default 1 h timeout, 2 CPU and 4Gi memory limits per step, a 10Gi shared volume and no `NET_RAW`/`MKNOD` capabilities or service-link variables. Change or disable the defaults with `hadesOperator.jobDefaultTimeoutSeconds`, `jobMaxTimeoutSeconds`, `jobDefaultCPULimit`, `jobDefaultMemoryLimit` and `jobSharedVolumeSizeLimit` (empty or `0` disables each).
 - Dashboard login allows 5 attempts per client address per 15 minutes. Behind a reverse proxy, set `DASHBOARD_TRUSTED_PROXIES`.
 
 ### Measuring Hades overhead

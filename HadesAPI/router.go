@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"reflect"
@@ -190,8 +191,26 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 		return
 	}
 
+	// The BuildJob CRD rejects these, which would leave an accepted job Queued
+	// forever, so refuse them here.
+	if len(p.QueuePayload.Steps) == 0 {
+		buildRequestsTotal.WithLabelValues("rejected").Inc()
+		c.String(http.StatusBadRequest, "At least one step is required")
+		return
+	}
+
 	seenStepIDs := make(map[int]bool, len(p.QueuePayload.Steps))
 	for _, step := range p.QueuePayload.Steps {
+		if step.ID < 1 || step.ID > math.MaxInt32 {
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusBadRequest, fmt.Sprintf("Invalid step id %d: step ids must be between 1 and %d", step.ID, math.MaxInt32))
+			return
+		}
+		if strings.TrimSpace(step.Image) == "" {
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusBadRequest, fmt.Sprintf("Step %d has an empty image: every step needs an image", step.ID))
+			return
+		}
 		if seenStepIDs[step.ID] {
 			buildRequestsTotal.WithLabelValues("rejected").Inc()
 			c.String(http.StatusBadRequest, fmt.Sprintf("Duplicate step id %d: step ids must be unique", step.ID))

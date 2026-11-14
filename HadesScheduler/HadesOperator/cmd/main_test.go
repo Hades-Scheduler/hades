@@ -175,3 +175,17 @@ func TestCacheOptions(t *testing.T) {
 		}
 	}
 }
+
+func TestJobDefaults(t *testing.T) {
+	d, err := (&OperatorConfig{JobDefaultCPULimit: "2", JobDefaultMemoryLimit: "4Gi", JobSharedVolumeSizeLimit: "10Gi"}).jobDefaults()
+	if err != nil || d.CPULimit == nil || d.MemoryLimit == nil || d.SharedVolumeSizeLimit == nil {
+		t.Fatalf("jobDefaults() = %+v, %v", d, err)
+	}
+	d, err = (&OperatorConfig{}).jobDefaults()
+	if err != nil || d.CPULimit != nil || d.MemoryLimit != nil || d.SharedVolumeSizeLimit != nil {
+		t.Errorf("empty config must disable the defaults, got %+v, %v", d, err)
+	}
+	if _, err := (&OperatorConfig{JobDefaultMemoryLimit: "lots"}).jobDefaults(); err == nil {
+		t.Error("an invalid quantity must fail")
+	}
+}

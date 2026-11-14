@@ -58,7 +58,7 @@ curl -X POST -H "Content-Type: application/json" \
 | Status | Body | Meaning |
 | ------ | ---- | ------- |
 | `200 OK` | `{ "message": "Successfully enqueued job", "job_id": "<uuid>" }` | Job accepted and queued. |
-| `400 Bad Request` | plain-text message naming the offending field | Invalid JSON or failed validation (e.g. missing `name`, unparseable `memory_limit`, duplicate step ids). |
+| `400 Bad Request` | plain-text message naming the offending field | Invalid JSON or failed validation (e.g. missing `name`, no steps, a step id outside 1..2147483647, a step without `image`, unparseable `memory_limit`, duplicate step ids). |
 | `413 Request Entity Too Large` | | The body exceeds 1 MiB. |
 | `500 Internal Server Error` | `Failed to enqueue job` | NATS publish failed. |
 
@@ -101,7 +101,7 @@ Submitted to `POST /build`. Field semantics come from `shared/payload/payload.go
 | `name` | string | **yes** | Human-readable job name. |
 | `timestamp` | RFC3339 | no | Job creation time. |
 | `metadata` | map[string]string | no | Job-level metadata (also injected as environment variables). |
-| `steps` | `[]Step` | no | Ordered steps to execute. |
+| `steps` | `[]Step` | yes | Ordered steps to execute (at least one). |
 | `callback_url` | string | no | Absolute http/https URL to forward aggregated logs/results to. |
 | `status_callback_url` | string | no | Absolute http/https URL that receives the job-status webhook when the job reaches a terminal status. Independent of `callback_url`; see [`HadesLogManager/Readme.md`](../HadesLogManager/Readme.md#job-status-webhook). |
 | `timeout_seconds` | int64 | no | Whole-job timeout in seconds. The job is killed and marked failed once exceeded. `0` (default) = no timeout. Enforced on both executors (Docker: context deadline; Kubernetes: Job `activeDeadlineSeconds`). |

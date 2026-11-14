@@ -70,6 +70,7 @@ type BuildStep struct {
 	// Steps execute in ascending ID order: step with id=1 runs first, then id=2, etc.
 	// This is mandatory and must be unique within the BuildJob.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2147483647
 	ID int32 `json:"id"`
 
 	// Descriptive name for this step, shown in logs and UI.

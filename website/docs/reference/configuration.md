@@ -110,6 +110,11 @@ Only deployed when the scheduler runs in `operator` mode.
 | `LOG_DRAIN_TIMEOUT` | `45s` | How long a completed `BuildJob` is kept while its container logs drain, before it is deleted anyway (Go duration). A zero or negative duration falls back to the default; a value that is not a valid Go duration fails operator startup. |
 | `FINALIZER_IMAGE` | `busybox:1.37.0` | Image for the main container of every `BuildJob` pod; it only runs `sh -c "echo build finished"`. Override for clusters without Docker Hub access. Keep it pinned - an untagged image means `:latest`, which Kubernetes forces to `imagePullPolicy: Always`. |
 | `K8S_IMAGE_PULL_POLICY` | | `imagePullPolicy` for build step containers: `always`, `if-not-present` or `never`. Empty leaves the Kubernetes default. Invalid values fail operator startup. |
+| `JOB_DEFAULT_TIMEOUT_SECONDS` | `3600` | Timeout applied to jobs that set no `timeout_seconds` (Job `activeDeadlineSeconds`), so a hung or unschedulable job cannot hold a parallelism slot forever. Empty or `0` disables it. |
+| `JOB_MAX_TIMEOUT_SECONDS` | `0` | Upper bound for the job timeout; a larger or missing job timeout is clamped to it. `0` means no cap. |
+| `JOB_DEFAULT_CPU_LIMIT` | `2` | CPU limit for each step that sets no `cpu_limit` (Kubernetes quantity; requests default to limits). Empty disables it. An invalid value fails operator startup. |
+| `JOB_DEFAULT_MEMORY_LIMIT` | `4Gi` | Memory limit for each step that sets no `memory_limit` (Kubernetes quantity). Empty disables it. An invalid value fails operator startup. |
+| `JOB_SHARED_VOLUME_SIZE_LIMIT` | `10Gi` | `sizeLimit` of the `emptyDir` shared between the steps of a job (`/shared`). Empty disables it. An invalid value fails operator startup. |
 | `DEV_MODE` | `false` | Enable the controller-runtime development logger. |
 
 The operator also accepts standard controller-runtime flags: `--health-probe-bind-address` (default `:8083`), `--metrics-bind-address` (default `:8082`, set `0` to disable), `--leader-elect`, and the log flags.

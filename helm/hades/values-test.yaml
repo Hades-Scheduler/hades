@@ -33,3 +33,12 @@ nats:
   # values.yaml hardcodes the "hades" namespace in the NATS service FQDN, so the
   # test namespace must point at its own NATS release (hades-nats.<namespace>).
   host: hades-nats.hades-test.svc.cluster.local
+
+# Job pods run untrusted code: keep them away from NATS, the log manager and the
+# other Hades pods. The cluster CNI (Calico) matches ipBlock rules against pod
+# IPs, so the pod network has to be excluded from the "outside" rule explicitly.
+networkPolicy:
+  enabled: true
+  jobPods:
+    blockedCIDRs:
+      - 198.18.0.0/15

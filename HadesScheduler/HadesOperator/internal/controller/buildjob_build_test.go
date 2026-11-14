@@ -2,12 +2,14 @@ package controller
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	buildv1 "github.com/hades-scheduler/hades/HadesScheduler/HadesOperator/api/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -57,7 +59,7 @@ func TestBuildK8sJob_ContinueOnError(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 
 	// Normal step: run the script directly so a failure fails the container.
 	normal := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, 1))
@@ -107,7 +109,7 @@ func TestBuildK8sJob_JobMetadataInjected(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 	c := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, 1))
 
 	wants := map[string]string{
@@ -147,7 +149,7 @@ func TestBuildK8sJob_NoDuplicateStepScriptEnv(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 	c := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, 1))
 
 	if n := envCount(c, "HADES_STEP_SCRIPT"); n != 1 {
@@ -173,7 +175,7 @@ func TestBuildK8sJob_ActiveDeadlineSeconds(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 	if job.Spec.ActiveDeadlineSeconds == nil {
 		t.Fatalf("ActiveDeadlineSeconds not set, want %d", timeout)
 	}
@@ -193,7 +195,7 @@ func TestBuildK8sJob_NoTimeoutLeavesDeadlineUnset(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 	if job.Spec.ActiveDeadlineSeconds != nil {
 		t.Errorf("ActiveDeadlineSeconds = %v, want nil", *job.Spec.ActiveDeadlineSeconds)
 	}
@@ -226,7 +228,7 @@ func TestBuildK8sJob_StepsRunInSharedVolume(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 
 	for _, id := range []int{1, 2} {
 		c := initContainer(t, job, fmt.Sprintf(BuildStepPrefix, id))
@@ -268,7 +270,7 @@ func TestBuildK8sJob_FinalizerImageIsPinnedAndNotAlwaysPulled(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 
 	var found bool
 	for _, c := range job.Spec.Template.Spec.Containers {
@@ -331,7 +333,7 @@ func TestBuildK8sJob_HonoursFinalizerImageOverride(t *testing.T) {
 	}
 
 	const custom = "registry.internal/busybox:1.36"
-	job := buildK8sJob(bj, "job-1", true, false, custom, "")
+	job := buildK8sJob(bj, "job-1", true, false, custom, "", JobDefaults{})
 
 	for _, c := range job.Spec.Template.Spec.Containers {
 		if c.Name == FinalizerContainerName {
@@ -360,7 +362,7 @@ func TestBuildK8sJob_PodHardening(t *testing.T) {
 		},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 	spec := job.Spec.Template.Spec
 
 	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
@@ -373,6 +375,95 @@ func TestBuildK8sJob_PodHardening(t *testing.T) {
 	for _, c := range append(spec.InitContainers, spec.Containers...) {
 		if c.SecurityContext == nil || c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation {
 			t.Errorf("container %q must set allowPrivilegeEscalation=false", c.Name)
+		}
+	}
+}
+
+func defaultsTestJob(timeout *int64, s buildv1.BuildStep) *buildv1.BuildJob {
+	s.ID, s.Image = 1, "alpine"
+	return &buildv1.BuildJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "job-1"},
+		Spec:       buildv1.BuildJobSpec{TimeoutSeconds: timeout, Steps: []buildv1.BuildStep{s}},
+	}
+}
+
+func TestBuildK8sJob_TimeoutDefaults(t *testing.T) {
+	i := func(v int64) *int64 { return &v }
+	cases := []struct {
+		name     string
+		job      *int64
+		defaults JobDefaults
+		want     *int64
+	}{
+		{"default applied", nil, JobDefaults{TimeoutSeconds: 3600}, i(3600)},
+		{"job timeout wins over default", i(60), JobDefaults{TimeoutSeconds: 3600}, i(60)},
+		{"max clamps larger job timeout", i(9000), JobDefaults{TimeoutSeconds: 3600, MaxTimeoutSeconds: 600}, i(600)},
+		{"max clamps missing job timeout", nil, JobDefaults{MaxTimeoutSeconds: 600}, i(600)},
+		{"smaller job timeout kept under max", i(60), JobDefaults{MaxTimeoutSeconds: 600}, i(60)},
+		{"disabled", nil, JobDefaults{}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildK8sJob(defaultsTestJob(tc.job, buildv1.BuildStep{}), "job-1", true, false, DefaultFinalizerImage, "", tc.defaults).Spec.ActiveDeadlineSeconds
+			if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+				t.Errorf("ActiveDeadlineSeconds = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildK8sJob_ResourceDefaults(t *testing.T) {
+	cpu, mem := resource.MustParse("2"), resource.MustParse("4Gi")
+	defaults := JobDefaults{CPULimit: &cpu, MemoryLimit: &mem}
+
+	// Nothing set by the step: both defaults apply and requests follow limits.
+	c := buildK8sJob(defaultsTestJob(nil, buildv1.BuildStep{}), "job-1", true, false, DefaultFinalizerImage, "", defaults).Spec.Template.Spec.InitContainers[0]
+	if !c.Resources.Limits.Cpu().Equal(cpu) || !c.Resources.Limits.Memory().Equal(mem) {
+		t.Errorf("limits = %v, want cpu=2 memory=4Gi", c.Resources.Limits)
+	}
+	if !c.Resources.Requests.Cpu().Equal(cpu) || !c.Resources.Requests.Memory().Equal(mem) {
+		t.Errorf("requests = %v, want to follow limits", c.Resources.Requests)
+	}
+
+	// The step sets only memory: its value wins, CPU falls back to the default.
+	stepMem := resource.MustParse("512Mi")
+	c = buildK8sJob(defaultsTestJob(nil, buildv1.BuildStep{MemoryLimit: &stepMem}), "job-1", true, false, DefaultFinalizerImage, "", defaults).Spec.Template.Spec.InitContainers[0]
+	if !c.Resources.Limits.Memory().Equal(stepMem) || !c.Resources.Limits.Cpu().Equal(cpu) {
+		t.Errorf("limits = %v, want memory=512Mi cpu=2", c.Resources.Limits)
+	}
+
+	// Disabled defaults leave the step unlimited.
+	c = buildK8sJob(defaultsTestJob(nil, buildv1.BuildStep{}), "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{}).Spec.Template.Spec.InitContainers[0]
+	if len(c.Resources.Limits) != 0 || len(c.Resources.Requests) != 0 {
+		t.Errorf("resources = %v, want none", c.Resources)
+	}
+}
+
+func TestBuildK8sJob_SharedVolumeSizeLimit(t *testing.T) {
+	size := resource.MustParse("10Gi")
+	vol := func(d JobDefaults) *corev1.EmptyDirVolumeSource {
+		return buildK8sJob(defaultsTestJob(nil, buildv1.BuildStep{}), "job-1", true, false, DefaultFinalizerImage, "", d).Spec.Template.Spec.Volumes[0].EmptyDir
+	}
+	if got := vol(JobDefaults{SharedVolumeSizeLimit: &size}).SizeLimit; got == nil || !got.Equal(size) {
+		t.Errorf("sizeLimit = %v, want 10Gi", got)
+	}
+	if got := vol(JobDefaults{}).SizeLimit; got != nil {
+		t.Errorf("sizeLimit = %v, want nil when disabled", got)
+	}
+}
+
+func TestBuildK8sJob_DropsCapabilitiesAndServiceLinks(t *testing.T) {
+	spec := buildK8sJob(defaultsTestJob(nil, buildv1.BuildStep{}), "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{}).Spec.Template.Spec
+	if spec.EnableServiceLinks == nil || *spec.EnableServiceLinks {
+		t.Error("enableServiceLinks must be false")
+	}
+	for _, c := range append(spec.InitContainers, spec.Containers...) {
+		caps := c.SecurityContext.Capabilities
+		if caps == nil || !slices.Contains(caps.Drop, "NET_RAW") || !slices.Contains(caps.Drop, "MKNOD") {
+			t.Errorf("container %q must drop NET_RAW and MKNOD, got %+v", c.Name, caps)
+		}
+		if slices.Contains(caps.Drop, "ALL") {
+			t.Errorf("container %q must not drop ALL", c.Name)
 		}
 	}
 }

@@ -18,7 +18,7 @@ http://localhost:8081
 
 ## Authentication
 
-`POST /build` requires HTTP Basic Auth with username `hades` and `AUTH_KEY` as the password. `AUTH_KEY` is required: with an empty key the API exits at start unless `ALLOW_UNAUTHENTICATED=true` (local development only). Request bodies are capped at 1 MiB (413 above) and duplicate step ids get 400.
+`POST /build` requires HTTP Basic Auth with username `hades` and `AUTH_KEY` as the password. `AUTH_KEY` is required: with an empty key the API exits at start unless `ALLOW_UNAUTHENTICATED=true` (local development only). Request bodies are capped at 1 MiB (413 above) and an empty `steps` list, a step id outside 1..2147483647, a step without `image` or duplicate step ids get 400.
 
 ## Job Payload Structure
 

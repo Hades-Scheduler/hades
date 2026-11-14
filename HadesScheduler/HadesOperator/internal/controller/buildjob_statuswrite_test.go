@@ -147,14 +147,14 @@ func TestBuildK8sJob_AppliesImagePullPolicyToSteps(t *testing.T) {
 		}},
 	}
 
-	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, corev1.PullIfNotPresent)
+	job := buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, corev1.PullIfNotPresent, JobDefaults{})
 	for _, c := range job.Spec.Template.Spec.InitContainers {
 		if c.ImagePullPolicy != corev1.PullIfNotPresent {
 			t.Errorf("%s ImagePullPolicy = %q, want IfNotPresent", c.Name, c.ImagePullPolicy)
 		}
 	}
 
-	job = buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "")
+	job = buildK8sJob(bj, "job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 	for _, c := range job.Spec.Template.Spec.InitContainers {
 		if c.ImagePullPolicy != "" {
 			t.Errorf("%s ImagePullPolicy = %q, want unset", c.Name, c.ImagePullPolicy)

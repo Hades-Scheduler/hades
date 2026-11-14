@@ -379,6 +379,38 @@ func (suite *APISuite) TestDuplicateStepIDs() {
 	assert.Contains(suite.T(), w.Body.String(), "Duplicate step id 1")
 }
 
+func (suite *APISuite) TestInvalidStepsRejected() {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"empty steps", `{"name":"x","steps":[]}`, "At least one step"},
+		{"no steps field", `{"name":"x"}`, "At least one step"},
+		{"empty image", `{"name":"x","steps":[{"id":1,"image":""}]}`, "empty image"},
+		{"blank image", `{"name":"x","steps":[{"id":1,"image":"   "}]}`, "empty image"},
+		{"id zero", `{"name":"x","steps":[{"id":0,"image":"i"}]}`, "Invalid step id 0"},
+		{"id negative", `{"name":"x","steps":[{"id":-1,"image":"i"}]}`, "Invalid step id -1"},
+		{"id too large", `{"name":"x","steps":[{"id":9223372036854775807,"image":"i"}]}`, "Invalid step id 9223372036854775807"},
+		{"id just above int32", `{"name":"x","steps":[{"id":2147483648,"image":"i"}]}`, "Invalid step id 2147483648"},
+	}
+	for _, tc := range cases {
+		suite.Run(tc.name, func() {
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequest("POST", "/build", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			suite.router.ServeHTTP(w, req)
+			assert.Equal(suite.T(), 400, w.Code)
+			assert.Contains(suite.T(), w.Body.String(), tc.want)
+		})
+	}
+}
+
+func (suite *APISuite) TestMaxInt32StepIDAccepted() {
+	w := suite.postStep(payload.Step{ID: 2147483647, Name: "s", Image: "image1"}, 0)
+	assert.Equal(suite.T(), 200, w.Code)
+}
+
 func (suite *APISuite) TestBuildBodyTooLarge() {
 	w := httptest.NewRecorder()
 	big := `{"name":"example","steps":[{"id":1,"name":"a","image":"i","script":"` + strings.Repeat("x", maxBuildBodyBytes) + `"}]}`

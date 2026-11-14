@@ -23,7 +23,7 @@ func TestBuildK8sJob_PodTemplateLabelsAndGracePeriod(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "job-1", Labels: map[string]string{LabelPriority: "3"}},
 		Spec:       buildv1.BuildJobSpec{Steps: []buildv1.BuildStep{{ID: 1, Image: "alpine"}}},
 	}
-	job := buildK8sJob(bj, "buildjob-job-1", true, false, DefaultFinalizerImage, "")
+	job := buildK8sJob(bj, "buildjob-job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 
 	podLabels := job.Spec.Template.Labels
 	if podLabels[LabelManagedBy] != ManagedByValue || podLabels[LabelBuildJob] != "job-1" || podLabels[LabelPriority] != "3" {
@@ -254,7 +254,7 @@ func TestResolvePod(t *testing.T) {
 			Labels: map[string]string{LabelManagedBy: ManagedByValue, LabelBuildJob: "job-2"},
 		}}
 		r := newAdmissionTestReconciler(t, 1, pod, other)
-		job := buildK8sJob(bj, "buildjob-job-1", true, false, DefaultFinalizerImage, "")
+		job := buildK8sJob(bj, "buildjob-job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 
 		got, err := r.resolvePod(ctx, bj, job)
 		if err != nil || got.Name != pod.Name {
@@ -264,7 +264,7 @@ func TestResolvePod(t *testing.T) {
 
 	t.Run("no pod yet is ErrPodNotFound", func(t *testing.T) {
 		r := newAdmissionTestReconciler(t, 1)
-		job := buildK8sJob(bj, "buildjob-job-1", true, false, DefaultFinalizerImage, "")
+		job := buildK8sJob(bj, "buildjob-job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 		if _, err := r.resolvePod(ctx, bj, job); !errors.Is(err, k8s.ErrPodNotFound) {
 			t.Fatalf("resolvePod() error = %v, want ErrPodNotFound", err)
 		}
@@ -331,7 +331,7 @@ func TestUpdateContainerStatuses_StopsOnLiveFinalizedBuildJob(t *testing.T) {
 		Labels: map[string]string{LabelManagedBy: ManagedByValue, LabelBuildJob: "job-1"},
 	}}
 	r := newAdmissionTestReconciler(t, 1, bj, pod)
-	job := buildK8sJob(bj, "buildjob-job-1", true, false, DefaultFinalizerImage, "")
+	job := buildK8sJob(bj, "buildjob-job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 
 	stale := bj.DeepCopy()
 	stale.Status.Phase = "Running"
@@ -493,7 +493,7 @@ func TestUpdateContainerStateMap_LivePodVetoesRestartAfterGrace(t *testing.T) {
 // not the one this pass computed.
 func TestCreateJob_AlreadyExistsReportsExistingSuspend(t *testing.T) {
 	bj := &buildv1.BuildJob{ObjectMeta: metav1.ObjectMeta{Name: "job-1", Namespace: "ns", UID: "uid-1"}}
-	existing := buildK8sJob(bj, "buildjob-job-1", true, false, DefaultFinalizerImage, "")
+	existing := buildK8sJob(bj, "buildjob-job-1", true, false, DefaultFinalizerImage, "", JobDefaults{})
 	// MaxParallelism 0 makes this pass want to suspend; the existing Job runs.
 	r := newAdmissionTestReconciler(t, 0, bj, existing)
 

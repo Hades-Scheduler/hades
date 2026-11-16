@@ -16,6 +16,8 @@ name: Deploy to Kubernetes (test)
 on:
   workflow_dispatch:
     inputs:
+      # For pr-N the chart and CRDs of that PR (fork PRs included) are applied with the
+      # test cluster's kubeconfig. Review the PR's helm/ and CRD changes before dispatching.
       version:
         description: "Image tag to deploy (e.g. latest, 1.0.0, pr-123, or a branch/sha tag)."
         required: true

@@ -26,7 +26,7 @@ The Operator introduces a `BuildJob` Custom Resource Definition (CRD). When the 
    reason recorded in the status and surfaced in the dashboard, and its `Job` is deleted so
    it stops retrying.
 3. Publishes status transitions and logs back to NATS.
-4. Cleans up completed resources (configurable via `DeleteOnComplete`).
+4. Cleans up completed resources (`DeleteOnComplete`, default `true`).
 
 ```
 NATS ──▶ Scheduler ──▶ BuildJob (CRD) ──▶ Operator Controller ──▶ Job / Pods
@@ -46,6 +46,12 @@ hadesScheduler:
 ```
 
 The scheduler uses a dynamic Kubernetes client to create `BuildJob` custom resources; the Operator does the rest. Authentication uses the pod's in-cluster `ServiceAccount` - no `kubeconfig` file is needed.
+
+## Job pod hardening
+
+Job pods do not mount a service account token, use the `RuntimeDefault` seccomp profile and set `allowPrivilegeEscalation: false`. They still run as the image's user, but every container drops the `NET_RAW` and `MKNOD` capabilities and the pod gets no service-link environment variables (`enableServiceLinks: false`). The operator also applies defaults to what a job leaves unset: a 1 h timeout (`JOB_DEFAULT_TIMEOUT_SECONDS`, cap with `JOB_MAX_TIMEOUT_SECONDS`), a 2 CPU and 4Gi memory limit per step (`JOB_DEFAULT_CPU_LIMIT`, `JOB_DEFAULT_MEMORY_LIMIT`) and clamps any step CPU or memory limit and request to 16 CPU and 32Gi (`JOB_MAX_CPU_LIMIT`, `JOB_MAX_MEMORY_LIMIT`). A job the API server rejects as invalid or too large is marked `Failed` instead of being retried and a 10Gi size limit on the shared volume (`JOB_SHARED_VOLUME_SIZE_LIMIT`). Set a value to empty or `0` to disable it (Helm: `hadesOperator.jobDefaultTimeoutSeconds` and friends). The API and the log manager have their own service accounts, and the operator role has no access to secrets or configmaps.
+
+The chart adds two NetworkPolicies (`networkPolicy.enabled`, default `true`): inside the cluster job pods reach DNS only, and only Hades components reach NATS on 4222. `networkPolicy.jobPods.blockedCIDRs` defaults to the private, CGNAT, link-local and benchmarking ranges; add the pod, service and node ranges of a cluster that uses other addresses. NATS also requires the credentials from the `hades-nats-auth` Secret (`nats.auth.secretName`), so a pod that gets past the policy still cannot read or publish.
 
 ## RBAC
 

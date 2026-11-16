@@ -8,7 +8,7 @@ services:
       dockerfile: ./HadesAPI/Dockerfile
     ports:
       # Set the Port to 8081 to avoid conflicts with the artemis server
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     networks:
       - hades
     depends_on:
@@ -17,6 +17,15 @@ services:
     environment:
       - NATS_URL=nats://nats:4222
       - HADES_VERSION=${HADES_VERSION:-dev}
+      - AUTH_KEY=${AUTH_KEY:?set AUTH_KEY in .env}
+      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME:-}
+      - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH:-}
+      - DASHBOARD_SESSION_SECRET=${DASHBOARD_SESSION_SECRET:-}
+      - DASHBOARD_SESSION_TTL=${DASHBOARD_SESSION_TTL:-12h}
+      - DASHBOARD_JOB_RETENTION=${DASHBOARD_JOB_RETENTION:-1h}
+      - DASHBOARD_TRUSTED_PROXIES=${DASHBOARD_TRUSTED_PROXIES:-}
+      - DASHBOARD_COOKIE_INSECURE=${DASHBOARD_COOKIE_INSECURE:-false}
+      - LOG_MANAGER_URL=http://hadesLogManager:8081
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
 
   hadesScheduler:
@@ -48,7 +57,7 @@ services:
       context: .
       dockerfile: ./HadesLogManager/Dockerfile
     ports:
-      - "8083:8081"  # Map to 8083 to avoid conflicts
+      - "127.0.0.1:8083:8081"  # Map to 8083 to avoid conflicts
     networks:
       - hades
     depends_on:
@@ -59,6 +68,11 @@ services:
     environment:
       - HADESLOGMANAGER_API_PORT=8081
       - NATS_URL=nats://nats:4222
+      # Internal callback receivers (host names, IPs, CIDRs) the log manager may
+      # POST to; empty = public addresses only.
+      - CALLBACK_ALLOWED_HOSTS=${CALLBACK_ALLOWED_HOSTS:-}
+      # Extra CIDRs to refuse, for networks that use public-looking addresses.
+      - CALLBACK_BLOCKED_CIDRS=${CALLBACK_BLOCKED_CIDRS:-}
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
 
   nats:
@@ -67,8 +81,8 @@ services:
     networks:
       - hades
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
     healthcheck:
       test: ["CMD", "nats-server", "--health"]
       interval: 10s
@@ -85,8 +99,8 @@ services:
     networks:
       - hades
     ports:
-      - "16686:16686" # Jaeger UI
-      - "4317:4317"   # OTLP gRPC receiver
+      - "127.0.0.1:16686:16686" # Jaeger UI
+      - "127.0.0.1:4317:4317" # OTLP gRPC receiver
 
 networks:
   hades:

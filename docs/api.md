@@ -27,7 +27,7 @@ curl http://localhost:8080/ping
 
 Validate a job, assign it a UUID, and enqueue it on NATS by priority.
 
-**Auth:** HTTP Basic Auth (`hades` / `AUTH_KEY`) when the server was started with a non-empty `AUTH_KEY`; otherwise open.
+**Auth:** HTTP Basic Auth (`hades` / `AUTH_KEY`). `AUTH_KEY` is required: the API exits at start with an empty key unless `ALLOW_UNAUTHENTICATED=true` (local development only), in which case the endpoint is open.
 
 **Request body** - a `RESTPayload` (see [Job payload schema](#job-payload-schema)):
 
@@ -58,7 +58,8 @@ curl -X POST -H "Content-Type: application/json" \
 | Status | Body | Meaning |
 | ------ | ---- | ------- |
 | `200 OK` | `{ "message": "Successfully enqueued job", "job_id": "<uuid>" }` | Job accepted and queued. |
-| `400 Bad Request` | plain-text message naming the offending field | Invalid JSON or failed validation (e.g. missing `name`, unparseable `memory_limit`). |
+| `400 Bad Request` | plain-text message naming the offending field | Invalid JSON or failed validation (e.g. missing `name`, no steps, a step id outside 1..2147483647, a step without `image`, unparseable `memory_limit`, duplicate step ids, more than 100 steps, `cpu_limit` above 1024, `memory_limit` or `memory_swap` above 1T). |
+| `413 Request Entity Too Large` | | The body exceeds 1 MiB. |
 | `500 Internal Server Error` | `Failed to enqueue job` | NATS publish failed. |
 
 ---
@@ -100,7 +101,7 @@ Submitted to `POST /build`. Field semantics come from `shared/payload/payload.go
 | `name` | string | **yes** | Human-readable job name. |
 | `timestamp` | RFC3339 | no | Job creation time. |
 | `metadata` | map[string]string | no | Job-level metadata (also injected as environment variables). |
-| `steps` | `[]Step` | no | Ordered steps to execute. |
+| `steps` | `[]Step` | yes | Ordered steps to execute (at least one). |
 | `callback_url` | string | no | Absolute http/https URL to forward aggregated logs/results to. |
 | `status_callback_url` | string | no | Absolute http/https URL that receives the job-status webhook when the job reaches a terminal status. Independent of `callback_url`; see [`HadesLogManager/Readme.md`](../HadesLogManager/Readme.md#job-status-webhook). |
 | `timeout_seconds` | int64 | no | Whole-job timeout in seconds. The job is killed and marked failed once exceeded. `0` (default) = no timeout. Enforced on both executors (Docker: context deadline; Kubernetes: Job `activeDeadlineSeconds`). |
@@ -117,7 +118,7 @@ Submitted to `POST /build`. Field semantics come from `shared/payload/payload.go
 | `metadata` | map[string]string | Step-specific environment variables. |
 | `cpu_limit` | uint | CPU limit in whole cores (e.g. `1` = 1 core, `2` = 2 cores). |
 | `memory_limit` | string | Memory limit, e.g. `512M`, `2G`. |
-| `network` | string | Docker network mode: `none`, `bridge`, `host`, `default`, or a named network. Empty = executor default. **Docker executor only** - accepted but not enforced on Kubernetes. |
+| `network` | string | Docker network mode: `none`, `bridge`, `host`, `default`, or a named network. Empty = executor default. The scheduler only accepts the modes in `DOCKER_ALLOWED_NETWORKS` (default `none,bridge,default`); `host` and named networks fail the job with a reason unless listed. **Docker executor only** - accepted but not enforced on Kubernetes. |
 | `memory_swap` | string | Total memory+swap limit (same format as `memory_limit`); must be set together with `memory_limit` and be `>=` it. **Docker executor only.** |
 | `pids_limit` | int64 | Max PIDs in the container; `0` = unlimited. **Docker executor only.** |
 
@@ -133,7 +134,7 @@ Steps of a job share a per-job volume, so a file written by one step is visible 
 
 ## Interactive OpenAPI spec
 
-HadesLogManager serves an interactive Swagger UI **only when `DEBUG=true`** (the spec is never exposed in production):
+HadesAPI and HadesLogManager serve an interactive Swagger UI **only when `DEBUG=true`** (the spec is never exposed in production). On HadesAPI it sits behind the same Basic Auth as `/build`:
 
 - HadesAPI: `http://localhost:8080/swagger/index.html`
 - HadesLogManager: `http://localhost:8081/swagger/index.html`

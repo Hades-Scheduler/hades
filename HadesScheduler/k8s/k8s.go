@@ -6,12 +6,16 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/hades-scheduler/hades/hadesScheduler/log"
 	hades "github.com/hades-scheduler/hades/shared"
+	status "github.com/hades-scheduler/hades/shared/buildstatus"
 	"github.com/hades-scheduler/hades/shared/payload"
 	"github.com/hades-scheduler/hades/shared/utils"
 	"github.com/nats-io/nats.go"
@@ -31,7 +35,7 @@ type Scheduler struct {
 	namespace string
 	config    K8sConfig
 	gvr       schema.GroupVersionResource
-	publisher log.NATSPublisher
+	publisher status.StatusPublisher
 }
 
 // K8sConfig holds the base Kubernetes executor configuration.
@@ -104,7 +108,7 @@ func NewK8sScheduler(nc *nats.Conn) (*Scheduler, error) {
 		if err != nil {
 			return nil, fmt.Errorf("creating NATS publisher: %w", err)
 		}
-		scheduler.publisher = *publisher
+		scheduler.publisher = publisher
 	} else {
 		slog.Warn("NATS connection is nil, publisher not created, logs will not be published")
 	}
@@ -163,6 +167,14 @@ func (k Scheduler) createBuildJobCR(ctx context.Context, job payload.QueuePayloa
 		return fmt.Errorf("dynamic client is nil: operator mode not initialized")
 	}
 
+	// Payloads can reach NATS without passing the API, so check what the CRD
+	// would reject anyway. Without a terminal status the job would stay Queued.
+	for _, s := range job.Steps {
+		if s.ID < 1 || s.ID > math.MaxInt32 {
+			return k.failInvalid(ctx, job, fmt.Sprintf("step id %d must be between 1 and %d", s.ID, math.MaxInt32))
+		}
+	}
+
 	obj := buildBuildJobObject(job, k.namespace)
 
 	_, err := k.dynClient.Resource(k.gvr).Namespace(k.namespace).Create(ctx, obj, metav1.CreateOptions{})
@@ -171,11 +183,33 @@ func (k Scheduler) createBuildJobCR(ctx context.Context, job payload.QueuePayloa
 			slog.Info("BuildJob already exists (idempotent)", "name", job.ID.String())
 			return nil
 		}
+		// The API server will never accept this job, so retrying is pointless.
+		if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+			return k.failInvalid(ctx, job, err.Error())
+		}
 		return err
 	}
 
 	slog.Info("Created BuildJob CR", "name", job.ID.String(), "namespace", k.namespace)
 	return nil
+}
+
+// maxReasonLen keeps the X-Hades-Reason header and webhook reason short.
+const maxReasonLen = 300
+
+// failInvalid publishes a terminal Failed status for a job that can never be
+// created, and returns the error for the caller to log.
+func (k Scheduler) failInvalid(ctx context.Context, job payload.QueuePayload, msg string) error {
+	reason := "invalid job: " + msg
+	if len(reason) > maxReasonLen {
+		reason = strings.ToValidUTF8(reason[:maxReasonLen], "")
+	}
+	if k.publisher == nil {
+		slog.Warn("No status publisher, cannot report invalid job as Failed", "id", job.ID.String())
+	} else if err := k.publisher.PublishJobStatus(ctx, status.StatusFailed, job.ID.String(), reason); err != nil {
+		slog.Error("Failed to publish Failed status for invalid job", "error", err, "id", job.ID.String())
+	}
+	return errors.New(reason)
 }
 
 // buildBuildJobObject maps a queue payload to the unstructured BuildJob custom

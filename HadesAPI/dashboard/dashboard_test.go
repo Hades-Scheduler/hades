@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,6 +213,65 @@ func TestLoginLockout(t *testing.T) {
 	}
 }
 
+func TestLoginLockoutParallelBurst(t *testing.T) {
+	s := testServer(t, true)
+	r := newRouter(s)
+	const burst = 40
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	codes := map[int]int{}
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"username":"admin","password":"wrong"}`))
+			req.Header.Set("Content-Type", "application/json")
+			r.ServeHTTP(w, req)
+			mu.Lock()
+			codes[w.Code]++
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if codes[http.StatusUnauthorized] != maxFailedAttempts || codes[http.StatusTooManyRequests] != burst-maxFailedAttempts {
+		t.Fatalf("want %d verified and %d locked, got %v", maxFailedAttempts, burst-maxFailedAttempts, codes)
+	}
+}
+
+func TestLoginSuccessClearsReservedAttempts(t *testing.T) {
+	s := testServer(t, true)
+	r := newRouter(s)
+	wrong := func() int {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"username":"admin","password":"wrong"}`))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	for i := 0; i < maxFailedAttempts-1; i++ {
+		wrong()
+	}
+	login(t, r)
+	for i := 0; i < maxFailedAttempts; i++ {
+		if code := wrong(); code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: want 401 after a successful login reset, got %d", i, code)
+		}
+	}
+}
+
+func TestLoginRejectsOversizedBody(t *testing.T) {
+	r := newRouter(testServer(t, true))
+	body := `{"username":"admin","password":"` + strings.Repeat("a", 1<<20) + `"}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for oversized body, got %d", w.Code)
+	}
+}
+
 func TestListJobsReflectsTracker(t *testing.T) {
 	s := testServer(t, true)
 	r := newRouter(s)
@@ -371,13 +431,16 @@ func TestLockoutMapBounded(t *testing.T) {
 	s := testServer(t, true)
 	// Far more distinct keys than the cap; the map must not grow unbounded.
 	for i := 0; i < maxFailureEntries+500; i++ {
-		s.auth.recordFailure("key-" + strconv.Itoa(i))
+		s.auth.reserve("key-" + strconv.Itoa(i))
 	}
 	s.auth.mu.Lock()
 	n := len(s.auth.failures)
 	s.auth.mu.Unlock()
 	if n > maxFailureEntries {
 		t.Fatalf("failures map grew to %d, cap is %d", n, maxFailureEntries)
+	}
+	if s.auth.reserve("one-key-too-many") {
+		t.Fatal("a full map must refuse attempts it cannot count")
 	}
 }
 

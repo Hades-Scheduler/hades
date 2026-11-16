@@ -33,8 +33,13 @@ The Hades Operator is designed to:
 - (Optional) If you want to have the operator to have the Cluster wide access, 
   modify `hadesOperator.clusterWide` top be `true`
 ```sh
-  helm upgrade --install hades ./helm/hades -n hades --create-namespace
+  kubectl create namespace hades
+  kubectl -n hades create secret generic hades-auth --from-literal=AUTH_KEY=<key-of-at-least-16-characters>
+  # NATS credentials, shared by the NATS server and the Hades components (letters and digits only)
+  kubectl -n hades create secret generic hades-nats-auth --from-literal=NATS_USERNAME=hades --from-literal=NATS_PASSWORD="hades$(openssl rand -hex 32)"
+  helm upgrade --install hades ./helm/hades -n hades --create-namespace --set hadesApi.authKeySecret=hades-auth
 ```
+> **NOTE**: `/build` then needs Basic Auth with user `hades` and that key. `--set hadesApi.allowUnauthenticated=true` is for throwaway test installs only.
 > **NOTE**: These commands will install the project within the hades namespace.
 
 **Create instances of your solution**

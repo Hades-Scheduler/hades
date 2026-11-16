@@ -2,6 +2,7 @@ package nats
 
 import (
 	"crypto/tls"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -39,8 +40,11 @@ func SetupNatsConnection(name string, timeout, reconnectWait time.Duration, maxR
 		nats.MaxReconnects(maxReconnects),
 	}
 
-	// Add credentials if provided
-	if config.Username != "" && config.Password != "" {
+	// Half a credential pair would silently connect without authentication.
+	if (config.Username == "") != (config.Password == "") {
+		return nil, errors.New("NATS_USERNAME and NATS_PASSWORD must be set together")
+	}
+	if config.Username != "" {
 		opts = append(opts, nats.UserInfo(config.Username, config.Password))
 	}
 

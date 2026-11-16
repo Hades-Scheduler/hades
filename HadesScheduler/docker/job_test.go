@@ -10,7 +10,7 @@ import (
 )
 
 // The step metadata becomes the container environment and routinely carries
-// tokens and API keys, so it must never reach the log at Info level.
+// tokens and API keys, so the raw values must reach the log at no level.
 func TestLogStepKeepsEnvironmentOutOfInfo(t *testing.T) {
 	step := payload.Step{
 		ID:       2,
@@ -21,11 +21,10 @@ func TestLogStepKeepsEnvironmentOutOfInfo(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		level      slog.Level
-		wantSecret bool
+		level slog.Level
 	}{
-		{slog.LevelInfo, false},
-		{slog.LevelDebug, true},
+		{slog.LevelInfo},
+		{slog.LevelDebug},
 	} {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: tc.level}))
@@ -38,10 +37,8 @@ func TestLogStepKeepsEnvironmentOutOfInfo(t *testing.T) {
 				t.Errorf("level %v: log %q lacks %q", tc.level, out, want)
 			}
 		}
-		for _, secret := range []string{"secret-value-123", "echo $API_KEY"} {
-			if got := strings.Contains(out, secret); got != tc.wantSecret {
-				t.Errorf("level %v: contains %q = %v, want %v\n%s", tc.level, secret, got, tc.wantSecret, out)
-			}
+		if strings.Contains(out, "secret-value-123") {
+			t.Errorf("level %v: log leaks the metadata value\n%s", tc.level, out)
 		}
 	}
 }

@@ -9,3 +9,10 @@
   ansible.builtin.fail:
     msg: "Docker is not installed"
   when: docker_installed.stat.exists == False
+
+- name: Fail if the api node has no auth key or NATS credentials
+  ansible.builtin.fail:
+    msg: "Set hades_api_password (API Basic Auth key), hades_nats_username and hades_nats_password for api nodes"
+  when:
+    - hades_node_role == "api"
+    - hades_api_password == "" or hades_nats_username == "" or hades_nats_password == ""

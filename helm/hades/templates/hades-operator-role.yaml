@@ -6,7 +6,7 @@ metadata:
   name: {{ .Values.rbac.hadesOperator.role.name }}
 rules:
   - apiGroups: [""]
-    resources: ["configmaps","pods","secrets"]
+    resources: ["pods"]
     verbs: ["get","list","watch","create","update","patch","delete"]
 
   - apiGroups: [""]
@@ -37,7 +37,7 @@ metadata:
   name: {{ .Values.rbac.hadesOperator.role.name }}
 rules:
   - apiGroups: [""]
-    resources: ["configmaps","pods","secrets"]
+    resources: ["pods"]
     verbs: ["get","list","watch","create","update","patch","delete"]
 
   - apiGroups: [""]

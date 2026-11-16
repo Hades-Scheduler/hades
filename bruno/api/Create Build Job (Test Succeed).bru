@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: http://{{hostname}}/build
+  url: {{scheme}}://{{hostname}}/build
   body: json
   auth: basic
 }
@@ -29,7 +29,7 @@ body:json {
     },
     "timestamp": "2021-01-01T00:00:00.000Z",
     "priority": 1, // optional, default 3
-    "callback_url": "http://localhost:8082/adapter/logs", // optional; where the Log Manager forwards aggregated logs. Omit to skip forwarding.
+    "callback_url": "http://localhost:8082/adapter/logs", // optional; where the Log Manager forwards aggregated logs. Omit to skip forwarding. Local targets need CALLBACK_ALLOWED_HOSTS=localhost on the Log Manager.
     "status_callback_url": "http://localhost:8082/adapter/job-status", // optional; receives the job-status webhook on the terminal status. Independent of callback_url.
     "steps": [
       {

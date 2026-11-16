@@ -44,8 +44,7 @@ spec:
             # DEV_MODE; wire it to the same toggle so debug mode is effective here.
             - name: DEV_MODE
               value: {{ .Values.debug | quote }}
-            - name: NATS_URL
-              value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
+            {{- include "hades.natsEnv" . | nindent 12 }}
             # Everything except WATCH_NAMESPACE is independent of the watch
             # scope, so it is injected in both namespaced and cluster-wide mode.
             - name: REQUEUE_DELAY
@@ -56,6 +55,20 @@ spec:
               value: {{ .Values.hadesOperator.finalizerImage | quote }}
             - name: K8S_IMAGE_PULL_POLICY
               value: {{ .Values.hadesOperator.imagePullPolicy | quote }}
+            - name: JOB_DEFAULT_TIMEOUT_SECONDS
+              value: {{ .Values.hadesOperator.jobDefaultTimeoutSeconds | quote }}
+            - name: JOB_MAX_TIMEOUT_SECONDS
+              value: {{ .Values.hadesOperator.jobMaxTimeoutSeconds | quote }}
+            - name: JOB_DEFAULT_CPU_LIMIT
+              value: {{ .Values.hadesOperator.jobDefaultCPULimit | quote }}
+            - name: JOB_DEFAULT_MEMORY_LIMIT
+              value: {{ .Values.hadesOperator.jobDefaultMemoryLimit | quote }}
+            - name: JOB_MAX_CPU_LIMIT
+              value: {{ .Values.hadesOperator.jobMaxCPULimit | quote }}
+            - name: JOB_MAX_MEMORY_LIMIT
+              value: {{ .Values.hadesOperator.jobMaxMemoryLimit | quote }}
+            - name: JOB_SHARED_VOLUME_SIZE_LIMIT
+              value: {{ .Values.hadesOperator.jobSharedVolumeSizeLimit | quote }}
             - name: MAX_CONCURRENT_RECONCILES
               value: {{ .Values.hadesOperator.maxConcurrentReconciles | quote }}
             - name: DELETE_ON_COMPLETE

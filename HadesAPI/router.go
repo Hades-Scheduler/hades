@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"reflect"
@@ -58,6 +59,19 @@ func securityHeaders() gin.HandlerFunc {
 	}
 }
 
+// maxBuildBodyBytes caps the /build request body (1 MiB).
+const maxBuildBodyBytes = 1 << 20
+
+// Sanity bounds on what one job may ask for. The step count keeps the
+// Kubernetes Job within what the API server accepts, the resource bounds keep
+// absurd values out of both executors (the Docker one multiplies cores into
+// nano CPUs).
+const (
+	maxSteps       = 100
+	maxCPULimit    = 1024
+	maxMemoryBytes = 1 << 40
+)
+
 func setupRouter(authKey string, producer hades.JobPublisher, statusPublisher buildstatus.StatusPublisher, dash *dashboard.Server) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.ErrorLogger())
@@ -78,18 +92,18 @@ func setupRouter(authKey string, producer hades.JobPublisher, statusPublisher bu
 
 	r.GET("/ping", ping)
 
-	// Swagger UI (and its doc.json) are only exposed when DEBUG is enabled, so
-	// the API contract is never served in production.
-	if os.Getenv("DEBUG") == "true" {
-		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
-	}
-
 	api := r.Group("/")
 	if authKey == "" {
 		slog.Warn("No auth key set")
 	} else {
 		slog.Info("Auth key set")
 		api.Use(gin.BasicAuth(gin.Accounts{"hades": authKey}))
+	}
+
+	// Swagger UI (and its doc.json) are only exposed when DEBUG is enabled and
+	// sit inside the auth group, so they need credentials when a key is set.
+	if os.Getenv("DEBUG") == "true" {
+		api.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
 
 	api.POST("/build", func(c *gin.Context) {
@@ -161,7 +175,14 @@ func bindErrorMessage(err error) string {
 func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublisher buildstatus.StatusPublisher, dash *dashboard.Server) {
 	var p payload.RESTPayload
 	p.Priority = 3
-	if err := c.ShouldBind(&p); err != nil {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBuildBodyBytes)
+	if err := c.ShouldBindJSON(&p); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusRequestEntityTooLarge, fmt.Sprintf("Request body must not exceed %d bytes", maxBuildBodyBytes))
+			return
+		}
 		msg := bindErrorMessage(err)
 		slog.Error("Failed to bind request payload", "error", err)
 		buildRequestsTotal.WithLabelValues("rejected").Inc()
@@ -180,7 +201,45 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 		return
 	}
 
+	// The BuildJob CRD rejects these, which would leave an accepted job Queued
+	// forever, so refuse them here.
+	if len(p.QueuePayload.Steps) == 0 {
+		buildRequestsTotal.WithLabelValues("rejected").Inc()
+		c.String(http.StatusBadRequest, "At least one step is required")
+		return
+	}
+
+	if len(p.QueuePayload.Steps) > maxSteps {
+		buildRequestsTotal.WithLabelValues("rejected").Inc()
+		c.String(http.StatusBadRequest, fmt.Sprintf("Too many steps: a job can have at most %d steps", maxSteps))
+		return
+	}
+
+	seenStepIDs := make(map[int]bool, len(p.QueuePayload.Steps))
 	for _, step := range p.QueuePayload.Steps {
+		if step.ID < 1 || step.ID > math.MaxInt32 {
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusBadRequest, fmt.Sprintf("Invalid step id %d: step ids must be between 1 and %d", step.ID, math.MaxInt32))
+			return
+		}
+		if strings.TrimSpace(step.Image) == "" {
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusBadRequest, fmt.Sprintf("Step %d has an empty image: every step needs an image", step.ID))
+			return
+		}
+		if seenStepIDs[step.ID] {
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusBadRequest, fmt.Sprintf("Duplicate step id %d: step ids must be unique", step.ID))
+			return
+		}
+		seenStepIDs[step.ID] = true
+
+		if step.CPULimit > maxCPULimit {
+			buildRequestsTotal.WithLabelValues("rejected").Inc()
+			c.String(http.StatusBadRequest, fmt.Sprintf("cpu_limit must not exceed %d cores", maxCPULimit))
+			return
+		}
+
 		var memLimitBytes int64
 		if step.MemoryLimit != "" {
 			parsed, err := utils.ParseMemoryLimit(step.MemoryLimit)
@@ -188,6 +247,11 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 				slog.Error("Failed to parse RAM limit", "error", err)
 				buildRequestsTotal.WithLabelValues("rejected").Inc()
 				c.String(http.StatusBadRequest, "Failed to parse RAM limit")
+				return
+			}
+			if parsed > maxMemoryBytes {
+				buildRequestsTotal.WithLabelValues("rejected").Inc()
+				c.String(http.StatusBadRequest, "memory_limit must not exceed 1T (1024G)")
 				return
 			}
 			memLimitBytes = parsed
@@ -198,6 +262,11 @@ func addBuildToQueue(c *gin.Context, producer hades.JobPublisher, statusPublishe
 			if err != nil {
 				slog.Error("Failed to parse memory_swap limit", "error", err)
 				c.String(http.StatusBadRequest, "Failed to parse memory_swap limit")
+				return
+			}
+			if swapBytes > maxMemoryBytes {
+				buildRequestsTotal.WithLabelValues("rejected").Inc()
+				c.String(http.StatusBadRequest, "memory_swap must not exceed 1T (1024G)")
 				return
 			}
 			// Docker requires memory_swap (total memory+swap) to be set together

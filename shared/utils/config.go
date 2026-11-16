@@ -3,6 +3,7 @@ package utils
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -66,14 +67,20 @@ func ParseMemoryLimit(limit string) (int64, error) {
 		return 0, fmt.Errorf("memory limit cannot be negative: %d", value)
 	}
 
+	var factor int64
 	switch strings.ToUpper(unit) {
 	case "G":
-		return value * gigabyte, nil
+		factor = gigabyte
 	case "M":
-		return value * megabyte, nil
+		factor = megabyte
 	default:
 		return 0, fmt.Errorf("unsupported memory unit %q: must be G (gigabytes) or M (megabytes)", unit)
 	}
+	// A huge value would wrap around to a small or negative byte count.
+	if value > math.MaxInt64/factor {
+		return 0, fmt.Errorf("memory limit too large: %s", limit)
+	}
+	return value * factor, nil
 }
 
 // namedNetworkPattern matches a valid Docker network name: it must start with an

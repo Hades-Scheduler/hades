@@ -49,6 +49,7 @@ type BuildJobSpec struct {
 	// Each step runs in its own container and can share data with other steps via mounted volumes.
 	// Typical pipeline: Step 1 clones code, Step 2 builds it, Step 3 runs tests.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=100
 	Steps []BuildStep `json:"steps"`
 
 	// Maximum time (in seconds) allowed for the entire BuildJob to complete.
@@ -70,6 +71,7 @@ type BuildStep struct {
 	// Steps execute in ascending ID order: step with id=1 runs first, then id=2, etc.
 	// This is mandatory and must be unique within the BuildJob.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2147483647
 	ID int32 `json:"id"`
 
 	// Descriptive name for this step, shown in logs and UI.

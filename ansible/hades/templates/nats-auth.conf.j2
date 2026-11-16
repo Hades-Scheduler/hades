@@ -1,0 +1,6 @@
+# Process arguments are readable by every user on the host, so the NATS
+# credentials live here and not on the command line.
+authorization {
+  user: {{ hades_nats_username | to_json }}
+  password: {{ hades_nats_password | to_json }}
+}

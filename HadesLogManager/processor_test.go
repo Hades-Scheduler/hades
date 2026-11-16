@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hades-scheduler/hades/shared/buildlogs"
+	"github.com/hades-scheduler/hades/shared/buildstatus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,7 +37,7 @@ func newTestAggregator(t *testing.T, resolver jobCallbackResolver) buildlogs.Log
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return NewLogAggregator(ctx, nil, resolver, nil, testConfig())
+	return NewLogAggregator(ctx, nil, resolver, loopbackClient(t), testConfig())
 }
 
 // newTestAggregatorMax builds an aggregator with a specific per-container entry
@@ -302,4 +304,183 @@ func TestCleanupStaleJobs(t *testing.T) {
 	agg.cleanupStaleJobs(time.Now())
 	_, err = agg.GetJobStatus("fresh")
 	assert.NoError(t, err)
+}
+
+func TestSendJobLogs_DoesNotFollowRedirects(t *testing.T) {
+	var targetHits int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
+	}))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	agg := newTestAggregator(t, fakeResolver{url: srv.URL})
+	agg.AddLog(buildlogs.Log{JobID: "job-1", ContainerID: "c1"})
+
+	require.Error(t, agg.SendJobLogs(context.Background(), "job-1"))
+	assert.Equal(t, int32(0), atomic.LoadInt32(&targetHits), "redirect target must not be contacted")
+}
+
+func TestSendJobLogs_BlocksLoopbackByDefault(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agg := NewLogAggregator(ctx, nil, fakeResolver{url: srv.URL}, nil, testConfig())
+	agg.AddLog(buildlogs.Log{JobID: "job-1", ContainerID: "c1"})
+
+	require.ErrorIs(t, agg.SendJobLogs(context.Background(), "job-1"), errBlockedTarget)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&hits))
+}
+
+func newBudgetAggregator(t *testing.T, budget int) *NATSLogAggregator {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cfg := AggregatorConfig{BatchSize: 100, Retention: time.Hour, MaxJobLogs: 1000, MaxTotalBytes: budget}
+	return NewLogAggregator(ctx, nil, nil, nil, cfg)
+}
+
+func addBytes(agg *NATSLogAggregator, jobID string, n int) {
+	agg.AddLog(buildlogs.Log{JobID: jobID, ContainerID: "c", Logs: []buildlogs.LogEntry{logEntry(strings.Repeat("x", n))}})
+}
+
+func completeJob(agg *NATSLogAggregator, jobID string, at time.Time) {
+	agg.UpdateJobStatus(jobID, "Succeeded")
+	agg.completed.Store(jobID, at)
+}
+
+func isEvicted(agg *NATSLogAggregator, jobID string) bool {
+	l := agg.GetJobLogs(jobID)
+	return len(l) == 1 && l[0].ContainerID == evictedContainerID && l[0].Logs[0].Message == evictedMessage
+}
+
+func TestLogBudget_EvictsOldestCompletedFirst(t *testing.T) {
+	agg := newBudgetAggregator(t, 100)
+	now := time.Now()
+	addBytes(agg, "old", 40)
+	addBytes(agg, "new", 40)
+	completeJob(agg, "new", now)
+	completeJob(agg, "old", now.Add(-time.Minute))
+
+	addBytes(agg, "run", 40) // 120 > 100: only the oldest completed job must go
+
+	assert.True(t, isEvicted(agg, "old"))
+	assert.False(t, isEvicted(agg, "new"))
+	assert.Equal(t, 80, agg.totalBytes)
+	assert.LessOrEqual(t, agg.totalBytes, 100)
+}
+
+func TestLogBudget_KeepsRunningLogsAndStatusAfterEviction(t *testing.T) {
+	agg := newBudgetAggregator(t, 100)
+	addBytes(agg, "run", 50)
+	addBytes(agg, "done", 40)
+	completeJob(agg, "done", time.Now())
+
+	addBytes(agg, "run", 30)
+
+	assert.True(t, isEvicted(agg, "done"), "the eviction marker is visible instead of an empty log")
+	s, err := agg.GetJobStatus("done")
+	assert.NoError(t, err)
+	assert.Equal(t, buildstatus.JobStatus("Succeeded"), s)
+	logs := agg.GetJobLogs("run")
+	assert.Len(t, logs, 1)
+	assert.Len(t, logs[0].Logs, 2, "running job keeps all its lines")
+}
+
+func TestLogBudget_DisabledWithZero(t *testing.T) {
+	agg := newBudgetAggregator(t, 0)
+	addBytes(agg, "a", 1000)
+	completeJob(agg, "a", time.Now())
+	addBytes(agg, "b", 1000)
+	assert.False(t, isEvicted(agg, "a"))
+	assert.Len(t, agg.GetJobLogs("b")[0].Logs, 1)
+}
+
+func TestLogBudget_DropsNewLinesWhenOnlyRunningJobsHoldBudget(t *testing.T) {
+	agg := newBudgetAggregator(t, 100)
+	addBytes(agg, "r1", 80)
+	addBytes(agg, "r2", 40) // does not fit, nothing completed to evict
+	addBytes(agg, "r2", 40)
+
+	assert.Equal(t, 80, agg.totalBytes)
+	logs := agg.GetJobLogs("r2")
+	assert.Len(t, logs, 1, "the container slot is still registered")
+	assert.Empty(t, logs[0].Logs)
+	assert.Len(t, agg.GetJobLogs("r1")[0].Logs, 1)
+}
+
+func TestLogBudget_FlushAndResetReleaseBytes(t *testing.T) {
+	agg := newBudgetAggregator(t, 100)
+	addBytes(agg, "a", 30)
+	addBytes(agg, "b", 30)
+	assert.Equal(t, 60, agg.totalBytes)
+	agg.ResetJobLogs("a")
+	assert.NoError(t, agg.FlushJob("b"))
+	assert.Equal(t, 0, agg.totalBytes)
+}
+
+func TestLogBudget_ConcurrentAddsNoRaceAndWithinBudget(t *testing.T) {
+	agg := newBudgetAggregator(t, 500)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := fmt.Sprintf("job-%d", i)
+			for j := 0; j < 50; j++ {
+				addBytes(agg, id, 10)
+			}
+			completeJob(agg, id, time.Now())
+		}(i)
+	}
+	wg.Wait()
+	agg.mu.Lock()
+	defer agg.mu.Unlock()
+	assert.LessOrEqual(t, agg.totalBytes, 500)
+}
+
+// A container at its MaxJobLogs cap replaces its oldest line, so the new line
+// must not count as extra budget even when the budget is full.
+func TestLogBudget_CappedContainerReplacesOldestLine(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	agg := NewLogAggregator(ctx, nil, nil, nil, AggregatorConfig{BatchSize: 100, Retention: time.Hour, MaxJobLogs: 1, MaxTotalBytes: 100})
+
+	agg.AddLog(buildlogs.Log{JobID: "j", ContainerID: "c", Logs: []buildlogs.LogEntry{logEntry(strings.Repeat("a", 60))}})
+	agg.AddLog(buildlogs.Log{JobID: "j", ContainerID: "c", Logs: []buildlogs.LogEntry{logEntry(strings.Repeat("b", 60))}})
+
+	logs := agg.GetJobLogs("j")
+	require.Len(t, logs[0].Logs, 1)
+	assert.Equal(t, strings.Repeat("b", 60), logs[0].Logs[0].Message)
+	assert.Equal(t, 60, agg.totalBytes)
+}
+
+// Flush and reset race with AddLog: the byte accounting must end at zero once
+// the logs are gone.
+func TestLogBudget_FlushRaceLeavesNoAccounting(t *testing.T) {
+	agg := newBudgetAggregator(t, 1<<20)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			addBytes(agg, "j", 10)
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		_ = agg.FlushJob("j")
+		agg.ResetJobLogs("j")
+	}
+	<-done
+	_ = agg.FlushJob("j")
+
+	assert.Equal(t, 0, agg.totalBytes)
+	assert.Empty(t, agg.jobBytes)
 }

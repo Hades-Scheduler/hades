@@ -1,7 +1,7 @@
 # Production overrides, layered on top of values.yaml by the
 # "Deploy to Kubernetes (prod)" workflow (namespace: hades).
 # Only non-secret configuration lives here; credentials are injected as
-# Kubernetes Secrets (hades-auth, hades-dashboard) created by the deploy workflow.
+# Kubernetes Secrets (hades-auth, hades-dashboard, hades-nats-auth) created by the deploy workflow.
 
 hadesApi:
   # Protect the /build endpoint with the AUTH_KEY from the hades-auth Secret.
@@ -12,3 +12,42 @@ hadesApi:
 
 ingress:
   host: hades.student.k8s.aet.cit.tum.de
+
+hadesLogManager:
+  # Callbacks must not reach the cluster nodes (same list as
+  # networkPolicy.jobPods.blockedCIDRs below; pods and services are covered by
+  # the built-in list). A receiver inside the cluster needs an entry in
+  # callbackAllowedHosts.
+  callbackBlockedCIDRs: "131.159.88.18/31,131.159.88.26/31,131.159.88.28/31,131.159.88.43/32,131.159.88.52/30,131.159.88.56/29,131.159.88.67/32,131.159.88.68/30,131.159.88.75/32,131.159.88.76/30"
+
+# Same cluster as the test install, hence the same lists as values-test.yaml.
+# Job pods run untrusted code: keep them away from NATS, the log manager and the
+# other Hades pods. The cluster CNI (Calico) matches ipBlock rules against pod
+# IPs, so the pod network has to be excluded from the "outside" rule explicitly.
+networkPolicy:
+  jobPods:
+    ingressNamespaces:
+      - ingress-nginx
+    blockedCIDRs:
+      # Chart defaults (this list replaces them). 198.18.0.0/15 holds the pod
+      # and service networks of this cluster.
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 100.64.0.0/10
+      - 169.254.0.0/16
+      - 198.18.0.0/15
+      # Node addresses of the cluster (API server, kubelet, etcd, SSH and
+      # node-exporter ports are otherwise reachable from job pods). The ingress
+      # load balancers share the subnet and must stay reachable, hence no /24.
+      # Keep in sync when nodes are added.
+      - 131.159.88.18/31
+      - 131.159.88.26/31
+      - 131.159.88.28/31
+      - 131.159.88.43/32
+      - 131.159.88.52/30
+      - 131.159.88.56/29
+      - 131.159.88.67/32
+      - 131.159.88.68/30
+      - 131.159.88.75/32
+      - 131.159.88.76/30

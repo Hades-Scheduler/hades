@@ -118,6 +118,8 @@ func TestParseMemoryLimit_InvalidInput(t *testing.T) {
 		{"single character", "G", "invalid memory limit format"},
 		{"negative value", "-5G", "memory limit cannot be negative"},
 		{"no unit", "123", "unsupported memory unit"},
+		{"overflowing gigabytes", "9223372036G", "memory limit too large"},
+		{"overflowing megabytes", "9223372036854775807M", "memory limit too large"},
 	}
 
 	for _, tt := range tests {

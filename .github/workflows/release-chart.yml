@@ -31,17 +31,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
 
       - name: Lint and template
         run: |
           helm repo add nats https://nats-io.github.io/k8s/helm/charts/
           helm dependency build helm/hades
           helm lint helm/hades
-          helm template hades helm/hades > /dev/null
+          helm template hades helm/hades --set hadesApi.authKeySecret=hades-auth > /dev/null
 
   # Publishes only on pushes to main (and manual dispatch), never on PRs.
   release:
@@ -52,10 +54,12 @@ jobs:
       packages: write # push the chart to GHCR
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin

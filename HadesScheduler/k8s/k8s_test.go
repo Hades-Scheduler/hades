@@ -1,13 +1,24 @@
 package k8s
 
 import (
+	"context"
+	"errors"
+	"math"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	status "github.com/hades-scheduler/hades/shared/buildstatus"
 	"github.com/hades-scheduler/hades/shared/payload"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/client-go/dynamic"
 )
 
 // TestBuildBuildJobObject verifies the payload-to-BuildJob mapping used by the
@@ -80,4 +91,85 @@ func TestNewK8sSchedulerRejectsNonPositiveRateLimits(t *testing.T) {
 		_, err := NewK8sScheduler(nil)
 		require.ErrorContains(t, err, "K8S_CLIENT_QPS")
 	}
+}
+
+type recordingPublisher struct {
+	statuses []status.JobStatus
+	reasons  []string
+}
+
+func (r *recordingPublisher) PublishJobStatus(_ context.Context, s status.JobStatus, _ string, reason ...string) error {
+	r.statuses = append(r.statuses, s)
+	r.reasons = append(r.reasons, status.FirstReason(reason...))
+	return nil
+}
+
+// stubDynamic counts Create calls and returns a canned error. The client-go
+// fake cannot be used: it deep-copies the object and panics on the plain Go
+// types (int, []map[string]interface{}) the scheduler builds.
+type stubDynamic struct {
+	dynamic.Interface
+	dynamic.NamespaceableResourceInterface
+	createErr error
+	creates   int
+}
+
+func (d *stubDynamic) Resource(schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
+	return d
+}
+
+func (d *stubDynamic) Namespace(string) dynamic.ResourceInterface { return d }
+
+func (d *stubDynamic) Create(context.Context, *unstructured.Unstructured, metav1.CreateOptions, ...string) (*unstructured.Unstructured, error) {
+	d.creates++
+	return nil, d.createErr
+}
+
+func newTestScheduler(createErr error) (Scheduler, *recordingPublisher, *stubDynamic) {
+	dyn := &stubDynamic{createErr: createErr}
+	pub := &recordingPublisher{}
+	return Scheduler{dynClient: dyn, namespace: "ns", publisher: pub}, pub, dyn
+}
+
+func TestCreateBuildJobCRFailureHandling(t *testing.T) {
+	gr := schema.GroupResource{Group: "build.hades.tum.de", Resource: "buildjobs"}
+	tests := []struct {
+		name       string
+		stepID     int
+		createErr  error
+		wantErr    bool
+		wantFailed bool
+		wantCreate int
+	}{
+		{"success", 1, nil, false, false, 1},
+		{"invalid from API server", 1, apierrors.NewInvalid(schema.GroupKind{Group: gr.Group, Kind: "BuildJob"}, "x", field.ErrorList{field.Invalid(field.NewPath("spec", "steps"), "[]", "bad")}), true, true, 1},
+		{"bad request", 1, apierrors.NewBadRequest("nope"), true, true, 1},
+		{"transient conflict", 1, apierrors.NewConflict(gr, "x", errors.New("boom")), true, false, 1},
+		{"already exists is idempotent", 1, apierrors.NewAlreadyExists(gr, "x"), false, false, 1},
+		{"step id too large", math.MaxInt32 + 1, nil, true, true, 0},
+		{"step id zero", 0, nil, true, true, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, pub, dyn := newTestScheduler(tt.createErr)
+			job := payload.QueuePayload{ID: uuid.New(), Steps: []payload.Step{{ID: tt.stepID, Image: "alpine"}}}
+			err := s.createBuildJobCR(context.Background(), job)
+			assert.Equal(t, tt.wantErr, err != nil)
+			assert.Equal(t, tt.wantCreate, dyn.creates)
+			if tt.wantFailed {
+				require.Equal(t, []status.JobStatus{status.StatusFailed}, pub.statuses)
+				assert.True(t, strings.HasPrefix(pub.reasons[0], "invalid job: "))
+			} else {
+				assert.Empty(t, pub.statuses)
+			}
+		})
+	}
+}
+
+func TestFailInvalidTruncatesReason(t *testing.T) {
+	s, pub, _ := newTestScheduler(nil)
+	err := s.failInvalid(context.Background(), payload.QueuePayload{ID: uuid.New()}, strings.Repeat("e", 1000))
+	require.Error(t, err)
+	require.Len(t, pub.reasons, 1)
+	assert.LessOrEqual(t, len(pub.reasons[0]), maxReasonLen)
 }

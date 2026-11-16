@@ -16,6 +16,7 @@ import (
 	"github.com/hades-scheduler/hades/shared/metrics"
 	hadesnats "github.com/hades-scheduler/hades/shared/nats"
 	"github.com/hades-scheduler/hades/shared/payload"
+	"github.com/hades-scheduler/hades/shared/redact"
 	"github.com/hades-scheduler/hades/shared/timing"
 	"github.com/hades-scheduler/hades/shared/utils"
 	"github.com/prometheus/client_golang/prometheus"
@@ -106,6 +107,8 @@ func main() {
 			docker.WithMemoryLimit(dockerCfg.MemoryLimit),
 			docker.WithImagePullPolicy(dockerCfg.ImagePullPolicy),
 			docker.WithImagePullFreshness(dockerCfg.ImagePullFreshness),
+			docker.WithAllowedNetworks(dockerCfg.AllowedNetworks),
+			docker.WithJobTimeouts(dockerCfg.DefaultJobTimeoutSeconds, dockerCfg.MaxJobTimeoutSeconds),
 			docker.WithLogPublisher(publisher),
 			docker.WithStatusPublisher(publisher),
 		)
@@ -158,7 +161,7 @@ func main() {
 
 	consumer.DequeueJob(ctx, func(p payload.QueuePayload) {
 		slog.Info("Received job", "id", p.ID.String())
-		slog.Debug("Job payload", "payload", p)
+		slog.Debug("Job payload", "payload", redact.Default().Payload(p))
 
 		if err := scheduler.ScheduleJob(ctx, p); err != nil {
 			slog.Error("Failed to schedule job", "error", err, "id", p.ID.String())

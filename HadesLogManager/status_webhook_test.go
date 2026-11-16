@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -298,6 +299,29 @@ func TestHandleInvalidStatusCallbackURLIsNotRetried(t *testing.T) {
 	assert.Equal(t, 1, msg.acked, "a malformed URL cannot be fixed by retrying")
 }
 
+func TestHandleBlockedTargetIsNotRetried(t *testing.T) {
+	sender := &recordingSender{err: fmt.Errorf("sending status webhook: %w", errBlockedTarget)}
+	d := testDispatcher(t, webhookResolver("http://127.0.0.1:9/hook"), sender)
+
+	msg := newFakeMsg(buildstatus.StatusSucceeded, "job-8", 1)
+	d.handle(context.Background(), msg)
+
+	assert.Equal(t, 1, msg.acked, "a blocked target cannot be fixed by retrying")
+	assert.Empty(t, msg.naks())
+}
+
+func TestHTTPWebhookSenderBlocksLoopbackByDefault(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+	}))
+	defer srv.Close()
+
+	err := newHTTPWebhookSender(5*time.Second, nil).Send(context.Background(), srv.URL, JobStatusEvent{JobID: "job-1"})
+	require.ErrorIs(t, err, errBlockedTarget)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&hits))
+}
+
 func TestHandleResolverErrorIsRetried(t *testing.T) {
 	sender := &recordingSender{}
 	d := testDispatcher(t, fakeInfoResolver{err: errors.New("kv unavailable")}, sender)
@@ -338,7 +362,7 @@ func TestHTTPWebhookSenderPostsJSONWithHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sender := newHTTPWebhookSender(5*time.Second, nil)
+	sender := newHTTPWebhookSender(5*time.Second, loopbackTransport(t))
 	event := buildEvent("job-1", "Example Job", buildstatus.StatusFailed, "boom",
 		time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC),
 		time.Date(2026, 8, 21, 12, 0, 1, 0, time.UTC),
@@ -366,7 +390,7 @@ func TestHTTPWebhookSenderTreatsNon2xxAsFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sender := newHTTPWebhookSender(5*time.Second, nil)
+	sender := newHTTPWebhookSender(5*time.Second, loopbackTransport(t))
 	err := sender.Send(context.Background(), srv.URL, JobStatusEvent{JobID: "job-1"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
@@ -385,7 +409,7 @@ func TestHTTPWebhookSenderDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sender := newHTTPWebhookSender(5*time.Second, nil)
+	sender := newHTTPWebhookSender(5*time.Second, loopbackTransport(t))
 	err := sender.Send(context.Background(), srv.URL, JobStatusEvent{JobID: "job-1"})
 
 	// Following the redirect would downgrade the POST to a bodyless GET and

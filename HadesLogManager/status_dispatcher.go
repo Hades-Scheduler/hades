@@ -298,6 +298,11 @@ func (d *StatusWebhookDispatcher) deliver(ctx context.Context, msg statusMsg, jo
 
 	event := buildEvent(jobID, info.Name, status, reason, queuedAt, startedAt, finishedAt, attempt)
 	if err := d.sender.Send(sendCtx, info.StatusCallbackURL, event); err != nil {
+		if errors.Is(err, errBlockedTarget) {
+			// Retrying cannot make a blocked target allowed, so settle it.
+			slog.Error("Status webhook target blocked, not retrying", "job_id", jobID, "error", err)
+			return true
+		}
 		if errors.Is(err, context.Canceled) {
 			slog.Debug("Status webhook cancelled during shutdown", "job_id", jobID)
 		} else {

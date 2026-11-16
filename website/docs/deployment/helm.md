@@ -54,6 +54,7 @@ By default the Operator is scoped to the release namespace. To schedule jobs acr
 
 ```bash
 helm upgrade hades oci://ghcr.io/hades-scheduler/charts/hades --version <version> -n hades \
+  --set hadesApi.authKeySecret=hades-auth \
   --set hadesOperator.clusterWide=true
 ```
 
@@ -62,7 +63,8 @@ This switches the `Role`/`RoleBinding` to a `ClusterRole`/`ClusterRoleBinding`.
 ## Upgrade & Rollback
 
 ```bash
-helm upgrade hades oci://ghcr.io/hades-scheduler/charts/hades --version <version> -n hades
+helm upgrade hades oci://ghcr.io/hades-scheduler/charts/hades --version <version> -n hades \
+  --set hadesApi.authKeySecret=hades-auth
 
 helm history hades -n hades
 helm rollback hades <revision> -n hades
@@ -79,7 +81,7 @@ kubectl delete namespace hades
 
 ```bash
 helm lint ./helm/hades
-helm template hades ./helm/hades -n hades
+helm template hades ./helm/hades -n hades --set hadesApi.authKeySecret=hades-auth
 make docs-helm          # regenerate the values table
 ```
 

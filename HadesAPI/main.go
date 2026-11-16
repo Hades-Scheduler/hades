@@ -40,9 +40,15 @@ type HadesAPIConfig struct {
 
 var cfg HadesAPIConfig
 
+const minAuthKeyLen = 16
+
 func (c HadesAPIConfig) validate() error {
 	if c.AuthKey == "" && !c.AllowUnauthenticated {
 		return errors.New("AUTH_KEY is empty: set AUTH_KEY, or set ALLOW_UNAUTHENTICATED=true to serve /build without authentication (local development only)")
+	}
+	// A short key is guessable over the network; refuse it like an empty one.
+	if c.AuthKey != "" && len(c.AuthKey) < minAuthKeyLen {
+		return fmt.Errorf("AUTH_KEY must be at least %d characters", minAuthKeyLen)
 	}
 	return nil
 }

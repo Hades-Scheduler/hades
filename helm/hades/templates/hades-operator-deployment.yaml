@@ -44,8 +44,7 @@ spec:
             # DEV_MODE; wire it to the same toggle so debug mode is effective here.
             - name: DEV_MODE
               value: {{ .Values.debug | quote }}
-            - name: NATS_URL
-              value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
+            {{- include "hades.natsEnv" . | nindent 12 }}
             # Everything except WATCH_NAMESPACE is independent of the watch
             # scope, so it is injected in both namespaced and cluster-wide mode.
             - name: REQUEUE_DELAY

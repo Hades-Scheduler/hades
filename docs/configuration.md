@@ -19,8 +19,8 @@ Every component connects to NATS with the same `ConnectionConfig`.
 | Variable | Default | Description | Source |
 | -------- | ------- | ----------- | ------ |
 | `NATS_URL` | `nats://localhost:4222` | NATS server URL. | `shared/nats/connection.go` |
-| `NATS_USERNAME` | | NATS username (optional). | `shared/nats/connection.go` |
-| `NATS_PASSWORD` | | NATS password (optional). | `shared/nats/connection.go` |
+| `NATS_USERNAME` | | NATS username. Set together with `NATS_PASSWORD` or not at all. | `shared/nats/connection.go` |
+| `NATS_PASSWORD` | | NATS password. Set together with `NATS_USERNAME` or not at all. | `shared/nats/connection.go` |
 | `NATS_TLS_ENABLED` | `false` | Enable TLS for the NATS connection. | `shared/nats/connection.go` |
 
 ## Metrics (all components)
@@ -74,7 +74,7 @@ The bundled Jaeger UI Service is cluster-internal (ClusterIP) by default, so you
 | -------- | ------- | ----------- | ------ |
 | `API_PORT` | `8080` | Port the HTTP API listens on. | `HadesAPI/main.go` (`HadesAPIConfig`) |
 | `METRICS_PORT` | `8082` | Port the Prometheus `/metrics` endpoint listens on (see [Metrics](#metrics-all-components)). | `HadesAPI/main.go` (`HadesAPIConfig`) |
-| `AUTH_KEY` | | HTTP Basic Auth key for the `hades` user. Required: the API exits at start when it is empty unless `ALLOW_UNAUTHENTICATED=true`. | `HadesAPI/main.go` (`HadesAPIConfig`) |
+| `AUTH_KEY` | | HTTP Basic Auth key for the `hades` user. Required, at least 16 characters: the API exits at start when it is empty (unless `ALLOW_UNAUTHENTICATED=true`) or shorter. | `HadesAPI/main.go` (`HadesAPIConfig`) |
 | `ALLOW_UNAUTHENTICATED` | `false` | Start with an empty `AUTH_KEY` and serve `/build` without auth. Local development only; `make run` sets it. | `HadesAPI/main.go` (`HadesAPIConfig`) |
 | `DASHBOARD_TRUSTED_PROXIES` | | Comma-separated proxy addresses or CIDRs whose `X-Forwarded-For` is trusted for the dashboard login lockout (5 attempts per client address per 15 minutes). Set it behind a reverse proxy, otherwise all clients share one lockout (a warning is logged at start). | `HadesAPI/main.go` (`HadesAPIConfig`) |
 

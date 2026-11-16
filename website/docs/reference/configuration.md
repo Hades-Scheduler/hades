@@ -22,8 +22,8 @@ Hades is configured entirely through environment variables (loaded via `caarlos0
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `NATS_URL` | `nats://localhost:4222` | NATS server URL. |
-| `NATS_USERNAME` | | NATS username (optional). |
-| `NATS_PASSWORD` | | NATS password (optional). |
+| `NATS_USERNAME` | | NATS username. Set together with `NATS_PASSWORD` or not at all. |
+| `NATS_PASSWORD` | | NATS password. Set together with `NATS_USERNAME` or not at all. |
 | `NATS_TLS_ENABLED` | `false` | Enable TLS for the NATS connection. |
 
 ## Metrics (all components)
@@ -51,7 +51,7 @@ Hades measures how much overhead it adds around a job, per step and per phase, c
 | -------- | ------- | ----------- |
 | `API_PORT` | `8080` | Port the HTTP API listens on. |
 | `METRICS_PORT` | `8082` | Port the Prometheus `/metrics` endpoint listens on. |
-| `AUTH_KEY` | | HTTP Basic Auth key for the `hades` user. Required: the API exits at start when it is empty unless `ALLOW_UNAUTHENTICATED=true`. |
+| `AUTH_KEY` | | HTTP Basic Auth key for the `hades` user. Required, at least 16 characters: the API exits at start when it is empty (unless `ALLOW_UNAUTHENTICATED=true`) or shorter. |
 | `ALLOW_UNAUTHENTICATED` | `false` | Serve `/build` without auth when `AUTH_KEY` is empty. Local development only. |
 | `DASHBOARD_TRUSTED_PROXIES` | | Proxy addresses or CIDRs whose `X-Forwarded-For` is trusted for the dashboard login lockout (5 attempts per client address per 15 minutes). Set it behind a reverse proxy. |
 

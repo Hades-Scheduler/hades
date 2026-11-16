@@ -60,7 +60,9 @@ The Scheduler does not create Pods directly; instead it creates `BuildJob` CRs, 
 3. Create the API auth Secret. `/build` then needs Basic Auth with user `hades` and that key. For throwaway test installs only, skip the Secret and pass `--set hadesApi.allowUnauthenticated=true` instead of `--set hadesApi.authKeySecret=hades-auth` (a set `authKeySecret` always wins).
     ```bash
     kubectl create namespace hades
-    kubectl -n hades create secret generic hades-auth --from-literal=AUTH_KEY=<choose-a-key>
+    kubectl -n hades create secret generic hades-auth --from-literal=AUTH_KEY=<key-of-at-least-16-characters>
+    # NATS credentials, shared by the NATS server and the Hades components (letters and digits only)
+    kubectl -n hades create secret generic hades-nats-auth --from-literal=NATS_USERNAME=hades --from-literal=NATS_PASSWORD="hades$(openssl rand -hex 32)"
     ```
 
 4. Install the chart (default: operator mode)

@@ -11,9 +11,13 @@ name: Deploy to Kubernetes
 #   DASHBOARD_USERNAME        - dashboard login user
 #   DASHBOARD_PASSWORD_HASH   - bcrypt hash of the dashboard password
 #   DASHBOARD_SESSION_SECRET  - dashboard session signing secret (>=32 chars)
+# The deploy stops before it touches the cluster when one of them is missing or
+# too weak (AUTH_KEY under 16 characters, session secret under 32, password hash
+# that is not bcrypt).
 # The AUTH_KEY and dashboard values are materialised as in-cluster Secrets
 # (hades-auth, hades-dashboard) on every run; the first run creates them and later runs
-# keep them in sync. When the dashboard credentials are present, a matching
+# keep them in sync. The NATS credentials (hades-nats-auth) are internal to the
+# release: the first run generates them in the cluster and later runs keep them. When the dashboard credentials are present, a matching
 # hades-jaeger-ui-auth Secret is also created so the Jaeger tracing UI (if enabled by
 # the values file) is protected by the same username/password as the dashboard.
 
@@ -61,6 +65,36 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.chart-ref }}
 
+      - name: Check deployment secrets
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          AUTH_KEY: ${{ secrets.AUTH_KEY }}
+          DASHBOARD_USERNAME: ${{ secrets.DASHBOARD_USERNAME }}
+          DASHBOARD_PASSWORD_HASH: ${{ secrets.DASHBOARD_PASSWORD_HASH }}
+          DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
+        # Inline (not a script file) so it also guards deploys of a chart ref
+        # that predates it. The values are never printed.
+        run: |
+          set -uo pipefail
+
+          failed=0
+          fail() {
+            echo "::error title=Deployment secret::$1"
+            failed=1
+          }
+
+          [ -n "${KUBE_CONFIG:-}" ] || fail "KUBE_CONFIG is not set"
+          [ "${#AUTH_KEY}" -ge 16 ] || fail "AUTH_KEY is missing or shorter than 16 characters"
+          [ -n "${DASHBOARD_USERNAME:-}" ] || fail "DASHBOARD_USERNAME is not set"
+          [[ "${DASHBOARD_PASSWORD_HASH:-}" =~ ^\$2[aby]\$[0-9]{2}\$.{53}$ ]] || fail "DASHBOARD_PASSWORD_HASH is not a bcrypt hash"
+          [ "${#DASHBOARD_SESSION_SECRET}" -ge 32 ] || fail "DASHBOARD_SESSION_SECRET is missing or shorter than 32 characters"
+
+          case "${AUTH_KEY:-}" in
+            changeme | password | "<choose-a-key>" | unused) fail "AUTH_KEY is a placeholder" ;;
+          esac
+
+          exit "$failed"
+
       - name: Install Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
 
@@ -102,24 +136,24 @@ jobs:
             --from-literal=DASHBOARD_PASSWORD_HASH="$DASHBOARD_PASSWORD_HASH" \
             --from-literal=DASHBOARD_SESSION_SECRET="$DASHBOARD_SESSION_SECRET" \
             --dry-run=client -o yaml | kubectl apply -f -
+          # NATS credentials: nobody outside the release needs them, so they are
+          # generated once and kept. Letters and digits only, starting with a
+          # letter, because the NATS server parses the value from its environment.
+          if ! kubectl get secret hades-nats-auth --namespace "$NAMESPACE" >/dev/null 2>&1; then
+            kubectl create secret generic hades-nats-auth \
+              --namespace "$NAMESPACE" \
+              --from-literal=NATS_USERNAME=hades \
+              --from-literal=NATS_PASSWORD="hades$(openssl rand -hex 32)"
+          fi
           # Basic-auth Secret for the Jaeger tracing UI, reusing the dashboard
           # credentials so the UI shares the dashboard's username/password. The
           # value is an htpasswd line "<user>:<bcrypt-hash>"; the dashboard hash is
-          # bcrypt, which the ingress-nginx basic-auth handler accepts. Only created
-          # when the dashboard credentials exist; the chart consumes it via
+          # bcrypt, which the ingress-nginx basic-auth handler accepts. The chart consumes it via
           # tracing.jaeger.ui.auth.existingSecret (test values enable this).
-          if [ -n "$DASHBOARD_USERNAME" ] && [ -n "$DASHBOARD_PASSWORD_HASH" ]; then
-            kubectl create secret generic hades-jaeger-ui-auth \
-              --namespace "$NAMESPACE" \
-              --from-literal=auth="${DASHBOARD_USERNAME}:${DASHBOARD_PASSWORD_HASH}" \
-              --dry-run=client -o yaml | kubectl apply -f -
-          else
-            # Fail closed: if dashboard credentials are removed, drop the stale
-            # basic-auth Secret so the Jaeger UI cannot keep accepting the old
-            # password.
-            kubectl delete secret hades-jaeger-ui-auth \
-              --namespace "$NAMESPACE" --ignore-not-found
-          fi
+          kubectl create secret generic hades-jaeger-ui-auth \
+            --namespace "$NAMESPACE" \
+            --from-literal=auth="${DASHBOARD_USERNAME}:${DASHBOARD_PASSWORD_HASH}" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Apply CRDs
         # Helm does not upgrade CRDs after the first install, so apply them explicitly.

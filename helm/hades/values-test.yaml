@@ -1,7 +1,7 @@
 # Test overrides, layered on top of values.yaml by the
 # "Deploy to Kubernetes (test)" workflow (namespace: hades-test).
 # Only non-secret configuration lives here; credentials are injected as
-# Kubernetes Secrets (hades-auth, hades-dashboard) created by the deploy workflow.
+# Kubernetes Secrets (hades-auth, hades-dashboard, hades-nats-auth) created by the deploy workflow.
 
 hadesLogManager:
   # Callbacks must not reach the cluster nodes either (same list as
@@ -44,13 +44,19 @@ nats:
 # other Hades pods. The cluster CNI (Calico) matches ipBlock rules against pod
 # IPs, so the pod network has to be excluded from the "outside" rule explicitly.
 networkPolicy:
-  enabled: true
   jobPods:
     ingressNamespaces:
       - ingress-nginx
     blockedCIDRs:
+      # Chart defaults (this list replaces them). 198.18.0.0/15 holds the pod
+      # and service networks of this cluster.
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 100.64.0.0/10
+      - 169.254.0.0/16
       - 198.18.0.0/15
-      # Node addresses of the test cluster (API server, kubelet, etcd, SSH and
+      # Node addresses of the cluster (API server, kubelet, etcd, SSH and
       # node-exporter ports are otherwise reachable from job pods). The ingress
       # load balancers share the subnet and must stay reachable, hence no /24.
       # Keep in sync when nodes are added.

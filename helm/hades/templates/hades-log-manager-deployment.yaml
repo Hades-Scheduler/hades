@@ -50,8 +50,7 @@ spec:
               value: {{ .Values.debug | quote }}
             - name: METRICS_PORT
               value: {{ .Values.monitoring.port | quote }}
-            - name: NATS_URL
-              value: "nats://{{ .Values.nats.host }}:{{ .Values.nats.port }}"
+            {{- include "hades.natsEnv" . | nindent 12 }}
             - name: HADESLOGMANAGER_API_PORT
               value: {{ .Values.hadesLogManager.service.targetPort | quote }}
             - name: LOG_MAX_TOTAL_BYTES

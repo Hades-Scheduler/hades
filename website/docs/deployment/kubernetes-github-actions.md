@@ -30,6 +30,8 @@ Both are `workflow_dispatch` only - nothing deploys automatically. They call the
 3. **Ensure the namespace** exists.
 4. **Create/update the app Secrets** (`hades-auth`, `hades-dashboard`) from the
    environment secrets. The first deploy creates them; later deploys keep them in sync.
+   The run fails before this step when a secret is missing or too weak. The NATS
+   credentials (`hades-nats-auth`) are generated once in the cluster.
 5. **Apply the CRDs** with a server-side apply. Helm never upgrades CRDs after the first
    install, and server-side apply avoids the client-side annotation size limit on the
    `BuildJob` CRD.
@@ -103,10 +105,12 @@ Add these to **each** GitHub environment (`k8s-prod` and `k8s-test`):
 | Secret | Purpose |
 |---|---|
 | `KUBE_CONFIG` | kubeconfig (plain YAML) for the target cluster |
-| `AUTH_KEY` | protects the API `/build` endpoint (Secret `hades-auth`) |
+| `AUTH_KEY` | protects the API `/build` endpoint (Secret `hades-auth`, >=16 chars) |
 | `DASHBOARD_USERNAME` | dashboard login user (Secret `hades-dashboard`) |
 | `DASHBOARD_PASSWORD_HASH` | bcrypt hash of the dashboard password |
 | `DASHBOARD_SESSION_SECRET` | dashboard session signing secret (>=32 chars) |
+
+The deploy stops before it touches the cluster when one of them is missing or too weak (`AUTH_KEY` under 16 characters, a password hash that is not bcrypt, a session secret under 32 characters). The NATS credentials (Secret `hades-nats-auth`) are generated in the cluster on the first deploy and kept afterwards.
 
 Paste the kubeconfig file's contents directly as `KUBE_CONFIG` (plain YAML, no encoding).
 

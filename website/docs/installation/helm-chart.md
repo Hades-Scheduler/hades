@@ -24,7 +24,9 @@ Create the API auth Secret first. `/build` then needs Basic Auth with user `hade
 
 ```bash
 kubectl create namespace hades
-kubectl -n hades create secret generic hades-auth --from-literal=AUTH_KEY=<choose-a-key>
+kubectl -n hades create secret generic hades-auth --from-literal=AUTH_KEY=<key-of-at-least-16-characters>
+# NATS credentials, shared by the NATS server and the Hades components (letters and digits only)
+kubectl -n hades create secret generic hades-nats-auth --from-literal=NATS_USERNAME=hades --from-literal=NATS_PASSWORD="hades$(openssl rand -hex 32)"
 ```
 
 ```bash

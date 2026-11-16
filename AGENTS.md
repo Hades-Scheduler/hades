@@ -67,7 +67,7 @@ The top-level `Makefile` wraps the common workflows (`make help` lists every tar
 
 - **CLI mode:** `make run` runs `HadesAPI`, `HadesScheduler`, and `HadesLogManager` via `go run` and auto-starts NATS in Docker.
 - **Docker mode:** `make docker-run` brings up `hadesAPI` (8081→8080), `hadesScheduler` (docker executor), and `nats` via `compose.yml`. API requests: see `bruno/api/*.bru`.
-- **K8s mode:** `helm upgrade --install hades ./helm/hades -n hades --create-namespace --set hadesApi.authKeySecret=hades-auth` (create that Secret with key `AUTH_KEY` first; `--set hadesApi.allowUnauthenticated=true` is for throwaway installs only). The chart deploys API, scheduler, operator, log manager, and embedded NATS JetStream.
+- **K8s mode:** `helm upgrade --install hades ./helm/hades -n hades --create-namespace --set hadesApi.authKeySecret=hades-auth` (create that Secret with key `AUTH_KEY`, at least 16 characters, and the `hades-nats-auth` Secret with keys `NATS_USERNAME`/`NATS_PASSWORD` first; `--set hadesApi.allowUnauthenticated=true` is for throwaway installs only). The chart deploys API, scheduler, operator, log manager, and embedded NATS JetStream.
 
 ## Conventions
 
@@ -82,7 +82,7 @@ The top-level `Makefile` wraps the common workflows (`make help` lists every tar
 - Don't add fields to `BuildJobSpec` without regenerating the CRD (CI will block the PR).
 - Don't introduce package-level mutable globals for dependencies - the codebase has been moving away from them (see `setupRouter` taking `JobPublisher` as a parameter).
 - `HadesLogManager` is deployed (Helm + image) but ClusterIP-internal and single-replica (in-memory aggregation, bounded by `LOG_MAX_TOTAL_BYTES`: oldest completed jobs lose their logs first); don't put it on the ingress or scale it past one replica. The status-webhook dispatcher living there keeps no durable state in memory (its retry schedule is in JetStream), but it still assumes one replica. The same single-replica constraint applies to the API's in-memory dashboard read-model. (It just isn't in the `compose.yml` stack.)
-- NATS itself still has no authentication; it must not be published beyond loopback (compose binds it to `127.0.0.1`, the deploy stack does not publish it). Never list the NATS network in `DOCKER_ALLOWED_NETWORKS`.
+- NATS requires credentials in the Helm chart (Secret `nats.auth.secretName`, default `hades-nats-auth`, read by the NATS server and all components; rendering fails when the server side is removed) and in the Ansible role. The compose stacks still run it without authentication; it must not be published beyond loopback (compose binds it to `127.0.0.1`, the deploy stack does not publish it). Never list the NATS network in `DOCKER_ALLOWED_NETWORKS`.
 - Don't re-open callbacks to internal addresses or add a redirect-following/proxy-aware callback client; use `CALLBACK_ALLOWED_HOSTS`.
 - Job pods must keep no service account token, `RuntimeDefault` seccomp, `allowPrivilegeEscalation: false`, `enableServiceLinks: false` and dropped `NET_RAW`/`MKNOD` capabilities (not `ALL`: grading images install packages as root); the operator role gets no secrets/configmaps access.
 - The dashboard treats all job/step `Metadata` and step `script` bodies as potentially secret: redact via `shared/redact` before returning any payload; never add an endpoint that returns raw metadata or an unscrubbed script. Job logs are proxied verbatim (a known, documented gap).
